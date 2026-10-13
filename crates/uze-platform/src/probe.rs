@@ -88,11 +88,25 @@ pub fn terminal_foreground_of(pid: u32) -> Option<u32> {
     platform::terminal_foreground_of(pid)
 }
 
+/// Where one of this user's processes stands, and whether anybody is
+/// behind it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkingDirectory {
+    pub path: PathBuf,
+    /// Whether the process holds a controlling terminal: it runs in a
+    /// session somebody at a keyboard can reach. A daemon put itself in a
+    /// session of its own and holds none, however it was started; so does
+    /// a job left behind once the shell that started it was gone. `None`
+    /// where the platform keeps no such fact (Windows), which a caller
+    /// must read as *unknown*, never as *no*.
+    pub attended: Option<bool>,
+}
+
 /// The working directory of every other process of this user, or `None`
 /// when the process table cannot be enumerated at all. This process and
 /// the ones it started are left out. A process that exits while being read,
 /// or whose directory the platform withholds, is skipped.
-pub fn working_directories() -> Option<Vec<PathBuf>> {
+pub fn working_directories() -> Option<Vec<WorkingDirectory>> {
     platform::working_directories()
 }
 
@@ -203,7 +217,7 @@ mod platform {
         super::value_in_environment_block(&block, key)
     }
 
-    pub(super) fn working_directories() -> Option<Vec<PathBuf>> {
+    pub(super) fn working_directories() -> Option<Vec<super::WorkingDirectory>> {
         use std::os::unix::fs::MetadataExt;
 
         let own = std::process::id();
@@ -221,7 +235,10 @@ mod platform {
                 continue;
             };
             let process = entry.path();
-            if pid == own || parent_in(&process) == Some(own) {
+            // One read of `stat` per process: the parent and the terminal
+            // are two fields of the same line.
+            let stat = stat_of(&process);
+            if pid == own || stat.as_ref().and_then(Stat::parent) == Some(own) {
                 continue;
             }
             if std::fs::metadata(&process)
@@ -231,19 +248,46 @@ mod platform {
             {
                 continue;
             }
-            if let Ok(directory) = std::fs::read_link(process.join("cwd")) {
-                directories.push(directory);
+            if let Ok(path) = std::fs::read_link(process.join("cwd")) {
+                directories.push(super::WorkingDirectory {
+                    path,
+                    attended: stat.as_ref().and_then(Stat::terminal),
+                });
             }
         }
         Some(directories)
     }
 
-    /// The parent pid in `/proc/<pid>/stat`, read after the command name,
-    /// which is parenthesised and may itself hold spaces and parentheses.
     fn parent_in(process: &std::path::Path) -> Option<u32> {
+        stat_of(process)?.parent()
+    }
+
+    /// `/proc/<pid>/stat` after the command name, which is parenthesised
+    /// and may itself hold spaces and parentheses: the fields from the
+    /// state on.
+    struct Stat(String);
+
+    fn stat_of(process: &std::path::Path) -> Option<Stat> {
         let stat = std::fs::read_to_string(process.join("stat")).ok()?;
-        let (_, after_name) = stat.rsplit_once(')')?;
-        after_name.split_whitespace().nth(1)?.parse().ok()
+        let (_, fields) = stat.rsplit_once(')')?;
+        Some(Stat(fields.to_owned()))
+    }
+
+    impl Stat {
+        fn field(&self, after_name: usize) -> Option<&str> {
+            self.0.split_whitespace().nth(after_name)
+        }
+
+        /// `ppid`, the first field after the command name.
+        fn parent(&self) -> Option<u32> {
+            self.field(1)?.parse().ok()
+        }
+
+        /// Whether `tty_nr`, the fourth field after the command name,
+        /// names a controlling terminal: `0` without one.
+        fn terminal(&self) -> Option<bool> {
+            Some(self.field(4)?.parse::<i64>().ok()? != 0)
+        }
     }
 }
 
@@ -507,12 +551,15 @@ mod platform {
         PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
     }
 
-    pub(super) fn working_directories() -> Option<Vec<PathBuf>> {
+    pub(super) fn working_directories() -> Option<Vec<super::WorkingDirectory>> {
         use std::{
             ffi::{CStr, c_int, c_void},
             mem::size_of,
             os::unix::ffi::OsStrExt,
         };
+
+        /// What `e_tdev` holds with no controlling terminal.
+        const NODEV: u32 = u32::MAX;
 
         let own = std::process::id();
         // SAFETY: `getuid` takes no arguments, cannot fail, and touches no
@@ -575,7 +622,10 @@ mod platform {
             // MAXPATHLEN bytes, laid out as a flat array.
             let path = unsafe { CStr::from_ptr(paths.pvi_cdir.vip_path.as_ptr().cast()) };
             if !path.to_bytes().is_empty() {
-                directories.push(PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes())));
+                directories.push(super::WorkingDirectory {
+                    path: PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes())),
+                    attended: Some(info.e_tdev != NODEV),
+                });
             }
         }
         Some(directories)
@@ -626,7 +676,7 @@ mod platform {
         None
     }
 
-    pub(super) fn working_directories() -> Option<Vec<PathBuf>> {
+    pub(super) fn working_directories() -> Option<Vec<super::WorkingDirectory>> {
         None
     }
 }
@@ -874,7 +924,12 @@ mod platform {
     /// PEB. Whose a process is is asked of its token: an administrator can
     /// open another user's processes, so that this one could not be opened
     /// was never the answer.
-    pub(super) fn working_directories() -> Option<Vec<PathBuf>> {
+    ///
+    /// Windows keeps no controlling terminal: a console is attached and
+    /// detached at will, and a process that broke away from a pane's Job
+    /// Object looks like any other. Whether anybody is behind a process is
+    /// therefore unknown here, which a caller reads as held.
+    pub(super) fn working_directories() -> Option<Vec<super::WorkingDirectory>> {
         use windows_sys::Win32::{
             Foundation::INVALID_HANDLE_VALUE,
             System::Diagnostics::ToolHelp::{
@@ -902,9 +957,12 @@ mod platform {
             if pid != own
                 && parent != own
                 && crate::process::user_of(pid).as_deref() == Some(user.as_str())
-                && let Some(directory) = current_directory_of(pid)
+                && let Some(path) = current_directory_of(pid)
             {
-                directories.push(directory);
+                directories.push(super::WorkingDirectory {
+                    path,
+                    attended: None,
+                });
             }
             // SAFETY: as above.
             more = unsafe { Process32NextW(snapshot.0, &mut entry) } != 0;

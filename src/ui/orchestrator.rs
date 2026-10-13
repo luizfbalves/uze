@@ -406,7 +406,13 @@ fn active_palette() -> uze_terminal::Palette {
         let rgb = theme.color(token);
         (rgb.0, rgb.1, rgb.2)
     };
+    let background = theme.color(Token::SurfaceBackground);
     uze_terminal::Palette {
+        scheme: if background.is_light() {
+            uze_terminal::Scheme::Light
+        } else {
+            uze_terminal::Scheme::Dark
+        },
         foreground: triple(Token::TextPrimary),
         background: triple(Token::SurfaceBackground),
         ansi: std::array::from_fn(|index| triple(Token::ANSI[index])),
@@ -453,7 +459,7 @@ pub(crate) fn attach_workspace(
     let Attached {
         mut stream,
         replaced,
-    } = attach(&seat).map_err(runtime_error)?;
+    } = attach(&seat, &active_palette()).map_err(runtime_error)?;
     let mut reader = BufReader::new(stream.try_clone().map_err(io_error)?);
     send_request(
         &mut stream,

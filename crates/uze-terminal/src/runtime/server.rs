@@ -89,6 +89,7 @@ pub(super) struct Server {
 impl Server {
     pub(super) fn new(
         seat: SpaceSeat,
+        palette: Palette,
         socket: PathBuf,
     ) -> Result<(Self, mpsc::Receiver<PaneId>), RuntimeError> {
         // Taken before anything is read: restoring a workspace a live
@@ -122,7 +123,7 @@ impl Server {
             workspace: workspace_lock,
             persisting: Mutex::new(None),
             damage,
-            palette: Arc::new(Mutex::new(Palette::default())),
+            palette: Arc::new(Mutex::new(palette)),
             set_aside: Mutex::new(set_aside),
             key,
             unattached: std::sync::atomic::AtomicUsize::new(0),
@@ -387,7 +388,9 @@ impl Server {
                     events.reply(ClientEvent::Detached);
                     break;
                 }
-                ClientRequest::SetPalette(palette) => self.set_palette(palette),
+                ClientRequest::SetPalette(palette) => {
+                    self.set_palette(palette);
+                }
                 ClientRequest::Input { pane, bytes } => self.write_input(pane, &bytes),
                 ClientRequest::Scroll { pane, lines } => self.scroll_pane(pane, lines),
                 ClientRequest::Select { pane, gesture } => {
@@ -811,10 +814,25 @@ impl Server {
     /// `Arc`, so panes that were already running answer with it too — a
     /// theme switch that only reached panes opened afterwards would leave
     /// the older ones telling their programs a colour nobody draws.
-    pub(super) fn set_palette(&self, palette: Palette) {
-        if let Ok(mut held) = self.palette.lock() {
-            *held = palette;
+    ///
+    /// A program that asked once and drew from the answer does not ask
+    /// again on its own, so a palette that differs from the last is
+    /// announced (DEC mode 2031) to every pane whose program asked to be
+    /// told, and that program asks again. Says whether it differed.
+    pub(super) fn set_palette(&self, palette: Palette) -> bool {
+        let changed = match self.palette.lock() {
+            Ok(mut held) if *held != palette => {
+                *held = palette;
+                true
+            }
+            _ => false,
+        };
+        if changed {
+            for pane in self.panes.lock().expect("panes poisoned").values() {
+                pane.notify_scheme(palette.scheme);
+            }
         }
+        changed
     }
 
     pub(super) fn spawn_pane(&self, pane_id: PaneId, launch: Launch) -> Result<(), RuntimeError> {

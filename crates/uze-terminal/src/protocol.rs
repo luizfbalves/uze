@@ -11,17 +11,45 @@ use crate::{PaneId, Session, SpaceId, TabId};
 /// [`crate::attach`] replaces a server of another build before connecting;
 /// this is what a client that connects without it — a `uze` nested in a
 /// pane, a test — still meets.
-pub const PROTOCOL_VERSION: u16 = 20;
+pub const PROTOCOL_VERSION: u16 = 21;
 
 /// The colours a client draws a pane's default and indexed cells in. Plain
 /// `(r, g, b)` triples: this runtime holds no opinion about appearance, it
 /// only repeats what it was told.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Palette {
+    /// Which of the two a program is told the palette is, when it asked to
+    /// be told of changes (DEC mode 2031). Judged by the client, which
+    /// owns what counts as light; the runtime repeats it like the rest.
+    pub scheme: Scheme,
     pub foreground: (u8, u8, u8),
     pub background: (u8, u8, u8),
     /// The sixteen a program can name by index.
     pub ansi: [(u8, u8, u8); 16],
+}
+
+/// The one bit a colour-scheme report carries.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum Scheme {
+    Dark,
+    Light,
+}
+
+impl Scheme {
+    fn spelling(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+
+    fn from_spelling(spelling: &str) -> Option<Self> {
+        match spelling {
+            "dark" => Some(Self::Dark),
+            "light" => Some(Self::Light),
+            _ => None,
+        }
+    }
 }
 
 impl Default for Palette {
@@ -29,6 +57,7 @@ impl Default for Palette {
     /// answers with something matching what UZE draws by default.
     fn default() -> Self {
         Self {
+            scheme: Scheme::Dark,
             foreground: (230, 228, 222),
             background: (10, 12, 13),
             ansi: [
@@ -51,6 +80,54 @@ impl Default for Palette {
             ],
         }
     }
+}
+
+impl Palette {
+    /// The palette as one command-line argument: the scheme, then eighteen
+    /// `rrggbb` colours, foreground and background first and the sixteen
+    /// by index — the shape the client starting a server hands it, so the
+    /// programs the server relaunches before any client attaches already
+    /// hear the colours that client draws with.
+    pub fn spelling(&self) -> String {
+        std::iter::once(self.scheme.spelling().to_owned())
+            .chain(
+                std::iter::once(self.foreground)
+                    .chain(std::iter::once(self.background))
+                    .chain(self.ansi)
+                    .map(|(r, g, b)| format!("{r:02x}{g:02x}{b:02x}")),
+            )
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    /// The palette [`Palette::spelling`] wrote, or `None` for anything
+    /// else: a spelling is never repaired, since one that is off is one
+    /// no client of this build wrote.
+    pub fn from_spelling(spelling: &str) -> Option<Self> {
+        let (scheme, colours) = spelling.split_once(',')?;
+        let scheme = Scheme::from_spelling(scheme)?;
+        let colours = colours
+            .split(',')
+            .map(parse_rrggbb)
+            .collect::<Option<Vec<_>>>()?;
+        let [foreground, background, ansi @ ..] = colours.as_slice() else {
+            return None;
+        };
+        Some(Self {
+            scheme,
+            foreground: *foreground,
+            background: *background,
+            ansi: ansi.try_into().ok()?,
+        })
+    }
+}
+
+fn parse_rrggbb(colour: &str) -> Option<(u8, u8, u8)> {
+    if colour.len() != 6 {
+        return None;
+    }
+    let channel = |at: usize| u8::from_str_radix(colour.get(at..at + 2)?, 16).ok();
+    Some((channel(0)?, channel(2)?, channel(4)?))
 }
 
 /// Where an attaching client lands, and whether saying so may bring a
@@ -86,7 +163,12 @@ pub enum ClientRequest {
     /// not the appearance, so the client tells it; sent on attach and again
     /// whenever the client changes theme, since the server outlives any one
     /// client and must not keep answering with a palette nobody is drawing
-    /// any more.
+    /// any more. A server this client starts is handed the palette on its
+    /// command line as well ([`Palette::spelling`]): it relaunches every
+    /// persisted program before the endpoint is even bound, and one that
+    /// asks in its first instants must not be told a palette nobody draws.
+    /// A program that asked to be told of changes (DEC mode 2031) is told
+    /// when a palette differs from the last, and asks again.
     SetPalette(Palette),
     Attach {
         version: u16,
@@ -422,6 +504,43 @@ pub struct CellAttributes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_palette_survives_its_command_line_spelling() {
+        let palette = Palette {
+            scheme: Scheme::Light,
+            foreground: (0x1c, 0x1c, 0x1e),
+            background: (0xff, 0xff, 0xff),
+            ..Palette::default()
+        };
+        let spelling = palette.spelling();
+        assert!(spelling.starts_with("light,1c1c1e,ffffff,"), "{spelling}");
+        assert_eq!(Palette::from_spelling(&spelling), Some(palette));
+    }
+
+    #[test]
+    fn a_spelling_no_client_wrote_is_refused_rather_than_repaired() {
+        // `aéaaa` is six bytes with a character boundary inside a channel.
+        for spelling in [
+            "",
+            "dark",
+            "dark,1c1c1e,ffffff",
+            "dark,1c1c1e;ffffff",
+            "dark,#1c1c1e,ffffff",
+            "dim,1c1c1e,ffffff",
+            "zz",
+            "dark,a\u{e9}aaa",
+        ] {
+            assert_eq!(
+                Palette::from_spelling(spelling),
+                None,
+                "{spelling:?} was taken for a palette"
+            );
+        }
+        let seventeen = Palette::default().spelling();
+        let seventeen = &seventeen[..seventeen.rfind(',').unwrap()];
+        assert_eq!(Palette::from_spelling(seventeen), None);
+    }
 
     #[test]
     fn protocol_is_versioned_and_serializable() {

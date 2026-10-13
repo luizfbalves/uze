@@ -21,8 +21,8 @@ use thiserror::Error;
 
 use crate::{
     CellAttributes, ClientEvent, ClientRequest, Cursor, MouseMode, NewSpace, PROTOCOL_VERSION,
-    Palette, PaneDamage, PaneId, PaneSnapshot, RenderCell, Seating, SelectionGesture, Session,
-    SpaceId, SpaceSeat, TabId, TerminalColor,
+    Palette, PaneDamage, PaneId, PaneSnapshot, RenderCell, Scheme, Seating, SelectionGesture,
+    Session, SpaceId, SpaceSeat, TabId, TerminalColor,
     launch::Launch,
     selection::PaneSelection,
     state::{OpenedSpace, PLACEHOLDER_PANE_SIZE, SpaceSeed, TabSeed},
@@ -37,6 +37,7 @@ mod outbox;
 mod pane;
 mod persist;
 mod process;
+mod scheme;
 mod server;
 use uze_platform::endpoint as transport;
 
@@ -49,6 +50,7 @@ use outbox::*;
 use pane::*;
 use persist::*;
 use process::*;
+use scheme::*;
 use server::*;
 pub use transport::{Stream, connect, pair as stream_pair};
 

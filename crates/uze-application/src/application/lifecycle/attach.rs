@@ -145,6 +145,27 @@ impl UzeApplication {
         integration: &dyn IntegrationPort,
         native_delivery: NativeDelivery,
     ) -> Result<PackageDelivery> {
+        // A delivery that failed on a harness older than its integration
+        // needs says so: the version is the likelier cause than the error.
+        self.attempt_package_delivery(package, resources, integration, native_delivery)
+            .map_err(|error| {
+                match crate::application::harness_floor::sentence(
+                    integration,
+                    &self.detect_cached(integration),
+                ) {
+                    Some(floor) => uze_core::UzeError::DeliveryFailed(format!("{error}. {floor}")),
+                    None => error,
+                }
+            })
+    }
+
+    fn attempt_package_delivery(
+        &self,
+        package: &StoredPackage,
+        resources: &[&Resource],
+        integration: &dyn IntegrationPort,
+        native_delivery: NativeDelivery,
+    ) -> Result<PackageDelivery> {
         let _span = tracing::info_span!(
             "integration.attach",
             integration = integration.id(),
@@ -235,10 +256,9 @@ impl UzeApplication {
                         });
                     }
                     // A native plan that returns no receipt explicitly
-                    // declined UZE ownership (for example, a same-name
-                    // plugin already imported by the harness). Its native
-                    // delivery remains authoritative, so avoid adding
-                    // duplicate capability-level fallbacks beside it.
+                    // declined UZE ownership. Its native delivery remains
+                    // authoritative, so avoid adding duplicate
+                    // capability-level fallbacks beside it.
                     provided = plan.provided_resource_identities;
                 }
             }

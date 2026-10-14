@@ -95,10 +95,8 @@ pub(super) fn generated_exact_coverage(
                     provided.insert(resource.identity());
                 }
             }
-            // Hooks are deliberately absent: the plugin carries no
-            // `hooks.json` any more, because the vendor never reads one from
-            // a plugin directory. They are delivered capability-level, as
-            // named entries merged into the shared `~/.gemini/config/hooks.json`.
+            // Hooks are covered by the integration, which knows which groups
+            // can be delivered here (`AntigravityIntegration::plugin_hooks`).
             _ => {}
         }
     }
@@ -145,21 +143,20 @@ fn generated_plugin_document(package: &StoredPackage) -> serde_json::Value {
 }
 
 /// Translates canonical `mcp.json` servers into the vendor's
-/// `mcp_config.json` form: every server entry passes through as-is, with
-/// the legacy remote keys `url`/`httpUrl` rewritten to the modern
-/// `serverUrl` — the exact mapping Antigravity's own official
-/// legacy-migration path performs (official docs: "Legacy schema keys:
-/// `url` or `httpUrl`; Modern schema key: `serverUrl`"). Nothing is
-/// dropped; stdio `command`, `args`, `env`, `cwd` carry only the package
-/// root resolved.
+/// `mcp_config.json` form: every server entry passes through as-is, a
+/// remote one under `url`, the key Antigravity's docs make primary since
+/// 1.3.3 (`serverUrl` stays the legacy one it also reads), with `httpUrl`
+/// renamed to it. Nothing is dropped; stdio `command`, `args`, `env`, `cwd`
+/// carry only the package root resolved.
 fn translated_mcp_config(package: &StoredPackage) -> serde_json::Value {
     let mut document = serde_json::json!({ "mcpServers": {} });
     if let Some(serde_json::Value::Object(servers)) = delivered_mcp_servers(package) {
         for (name, mut server) in servers {
             if let Some(value) = server.as_object_mut()
-                && let Some(url) = value.remove("url").or_else(|| value.remove("httpUrl"))
+                && !value.contains_key("url")
+                && let Some(url) = value.remove("httpUrl")
             {
-                value.insert("serverUrl".to_owned(), url);
+                value.insert("url".to_owned(), url);
             }
             document["mcpServers"][name] = server;
         }
@@ -178,6 +175,8 @@ fn translated_mcp_config(package: &StoredPackage) -> serde_json::Value {
 pub(super) fn materialize_generated_plugin(
     uze_home: &UzeHome,
     package: &StoredPackage,
+    hooks: &serde_json::Map<String, serde_json::Value>,
+    agents: &[(String, String)],
 ) -> Result<PathBuf> {
     let dir = generated_package_dir_for_id(uze_home, package.id.as_str());
     uze_core::persistence::replace_dir(&dir, |staging| {
@@ -223,14 +222,32 @@ pub(super) fn materialize_generated_plugin(
             )
             .map_err(UzeError::write(staging.join("mcp_config.json")))?;
         }
-        // No `hooks.json` is written here. AGY 1.1.24 reads hooks from its
-        // shared customization roots and never opens a plugin's `hooks.json`,
-        // whatever its own plugin guide says (measured in the Conformance Lab:
-        // `agy plugin validate` counts the file's hooks while the session
-        // reports `loaded 0 named hooks from 0 hooks.json file(s)`). A file the
-        // vendor never reads is not a delivery, so hooks go to
-        // `~/.gemini/config/hooks.json` as receipt-owned named entries instead
-        // (see `AntigravityIntegration::hook_exposure_plan`).
+        // The plugin's own `hooks.json`, one named hook per canonical group,
+        // each running the shared wrapper: Antigravity loads it from the
+        // plugin root (1.3.5, `experiments/antigravity/plugin-hooks`), so
+        // enabling or disabling the plugin governs its hooks too.
+        // Its agents, each under its label and declared by the plugin's root
+        // `agents.json` (1.3.3); the same definitions the global agents
+        // directory would hold.
+        if !agents.is_empty() {
+            let agents_dir = staging.join("agents");
+            fs::create_dir_all(&agents_dir).map_err(UzeError::write(&agents_dir))?;
+            for (file_name, content) in agents {
+                write_file(&agents_dir.join(file_name), content.as_bytes())?;
+            }
+            fs::write(
+                staging.join("agents.json"),
+                br#"{"entries":[{"path":"agents"}]}"#,
+            )
+            .map_err(UzeError::write(staging.join("agents.json")))?;
+        }
+        if !hooks.is_empty() {
+            fs::write(
+                staging.join("hooks.json"),
+                serde_json::to_vec_pretty(hooks).expect("generated hooks are serializable"),
+            )
+            .map_err(UzeError::write(staging.join("hooks.json")))?;
+        }
         Ok(())
     })?;
     Ok(dir)
@@ -411,12 +428,32 @@ mod generated_native_tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// The older `httpUrl` spelling reaches Antigravity as `url`; a server
+    /// already under `url` keeps it as written.
+    #[test]
+    fn a_remote_server_is_delivered_under_url() {
+        let (root, pkg) = make_package_with_mcp("remote-url");
+        fs::write(
+            pkg.root.join("mcp.json"),
+            r#"{"mcpServers":{"old":{"httpUrl":"https://old.example/mcp"},"new":{"url":"https://new.example/mcp","httpUrl":"https://ignored.example/mcp"}}}"#,
+        )
+        .unwrap();
+        let servers = &translated_mcp_config(&pkg)["mcpServers"];
+        assert_eq!(
+            servers["old"],
+            serde_json::json!({"url": "https://old.example/mcp"})
+        );
+        assert_eq!(servers["new"]["url"], "https://new.example/mcp");
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn materialize_translates_and_never_writes_into_the_store() {
         let (root, pkg) = make_package_with_mcp("materialize");
         let uze_home = UzeHome::at(root.join("uze"));
         let before: BTreeSet<PathBuf> = walk(&pkg.root);
-        let dir = materialize_generated_plugin(&uze_home, &pkg).unwrap();
+        let dir =
+            materialize_generated_plugin(&uze_home, &pkg, &serde_json::Map::new(), &[]).unwrap();
         let after: BTreeSet<PathBuf> = walk(&pkg.root);
         assert_eq!(
             before, after,
@@ -440,12 +477,12 @@ mod generated_native_tests {
             serde_json::from_slice(&fs::read(dir.join("mcp_config.json")).unwrap()).unwrap();
         assert_eq!(mcp["mcpServers"]["mcp-a"]["command"], "a");
         assert_eq!(
-            mcp["mcpServers"]["remote-b"]["serverUrl"],
+            mcp["mcpServers"]["remote-b"]["url"],
             "https://example.com/mcp"
         );
         assert!(
-            mcp["mcpServers"]["remote-b"].get("url").is_none(),
-            "legacy url key must be rewritten"
+            mcp["mcpServers"]["remote-b"].get("serverUrl").is_none(),
+            "a remote server is delivered under `url`, the key Antigravity reads first"
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -468,7 +505,8 @@ mod generated_native_tests {
         )
         .unwrap();
         let uze_home = UzeHome::at(root.join("uze"));
-        let dir = materialize_generated_plugin(&uze_home, &pkg).unwrap();
+        let dir =
+            materialize_generated_plugin(&uze_home, &pkg, &serde_json::Map::new(), &[]).unwrap();
         let skill = fs::read_to_string(dir.join("skills/commit/SKILL.md")).unwrap();
         assert!(
             skill.contains(&format!("Run {}/scripts/x.sh", pkg.root.display())),
@@ -490,7 +528,8 @@ mod generated_native_tests {
             "fixture must be marketplace-qualified"
         );
         let uze_home = UzeHome::at(root.join("uze"));
-        let dir = materialize_generated_plugin(&uze_home, &pkg).unwrap();
+        let dir =
+            materialize_generated_plugin(&uze_home, &pkg, &serde_json::Map::new(), &[]).unwrap();
         assert!(
             !dir.file_name().unwrap().to_str().unwrap().contains('@'),
             "generated dir name must not contain '@': {dir:?}"
@@ -502,12 +541,12 @@ mod generated_native_tests {
     fn materialize_is_deterministic_across_rebuilds() {
         let (root, pkg) = make_package_with_mcp("deterministic");
         let uze_home = UzeHome::at(root.join("uze"));
-        materialize_generated_plugin(&uze_home, &pkg).unwrap();
+        materialize_generated_plugin(&uze_home, &pkg, &serde_json::Map::new(), &[]).unwrap();
         let first = fs::read(
             generated_package_dir_for_id(&uze_home, pkg.id.as_str()).join("mcp_config.json"),
         )
         .unwrap();
-        materialize_generated_plugin(&uze_home, &pkg).unwrap();
+        materialize_generated_plugin(&uze_home, &pkg, &serde_json::Map::new(), &[]).unwrap();
         let second = fs::read(
             generated_package_dir_for_id(&uze_home, pkg.id.as_str()).join("mcp_config.json"),
         )
@@ -527,7 +566,8 @@ mod generated_native_tests {
     fn the_generated_plugin_carries_no_hooks_and_claims_none() {
         let (root, pkg) = make_package_with_hooks("plugin-hooks");
         let uze_home = UzeHome::at(root.join("uze"));
-        let dir = materialize_generated_plugin(&uze_home, &pkg).unwrap();
+        let dir =
+            materialize_generated_plugin(&uze_home, &pkg, &serde_json::Map::new(), &[]).unwrap();
         assert!(
             !dir.join("hooks.json").exists(),
             "a file the harness never reads is not a delivery"
@@ -563,7 +603,7 @@ mod generated_native_tests {
     fn remove_generated_plugin_deletes_only_the_derived_directory() {
         let (root, pkg) = make_package_with_mcp("removal");
         let uze_home = UzeHome::at(root.join("uze"));
-        materialize_generated_plugin(&uze_home, &pkg).unwrap();
+        materialize_generated_plugin(&uze_home, &pkg, &serde_json::Map::new(), &[]).unwrap();
         assert!(generated_package_dir_for_id(&uze_home, pkg.id.as_str()).exists());
         remove_generated_plugin_by_id(&uze_home, pkg.id.as_str()).unwrap();
         assert!(!generated_package_dir_for_id(&uze_home, pkg.id.as_str()).exists());
@@ -601,7 +641,8 @@ mod generated_native_tests {
         )
         .unwrap();
         let uze_home = UzeHome::at(root.join("uze"));
-        let dir = materialize_generated_plugin(&uze_home, &pkg).unwrap();
+        let dir =
+            materialize_generated_plugin(&uze_home, &pkg, &serde_json::Map::new(), &[]).unwrap();
         let delivered: serde_json::Value =
             serde_json::from_slice(&fs::read(dir.join("mcp_config.json")).unwrap()).unwrap();
         assert_eq!(

@@ -106,16 +106,18 @@ impl Workspace<'_> {
             );
             child.label = topic.to_owned();
             child.parent = Some(caller.agent.clone());
+            let owner = child.id.clone();
             let isolation = child
                 .isolation_mut()
                 .expect("an agent built isolated carries its isolation");
             let acquired = checkout::acquire(
                 &caller.primary,
                 store,
+                &owner,
                 isolation,
                 &head,
                 policy.slots,
-                &Presence::observe_with(occupied),
+                &|| Presence::observe_with(occupied),
             )
             .map_err(|refusal| refused(&refusal.to_string()))?;
             isolation.checkout = Some(acquired.id.clone());
@@ -289,7 +291,7 @@ impl Workspace<'_> {
                     let into = parent.branch.clone();
                     // Joined, it holds nothing its agent's branch lacks, and
                     // the release records it so.
-                    checkout::release(primary, child, &into, &Presence::observe());
+                    checkout::release(primary, child, &into, &Presence::observe);
                     Ok(JoinedWork::Joined { commits })
                 }
             }

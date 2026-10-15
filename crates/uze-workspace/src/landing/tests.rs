@@ -42,18 +42,14 @@ fn launch_from(repository: &Repository, store: &mut AgentStore, label: &str, bas
         base.to_owned(),
         TARGET.into(),
     );
+    let owner = agent.id.clone();
     let isolation = agent
         .isolation_mut()
         .expect("an isolated agent carries its isolation");
     let base = isolation.base_commit.clone();
-    let acquired = acquire(
-        primary,
-        store,
-        isolation,
-        &base,
-        None,
-        &crate::checkout::Presence::Known(Vec::new()),
-    )
+    let acquired = acquire(primary, store, &owner, isolation, &base, None, &|| {
+        crate::checkout::Presence::Known(Vec::new())
+    })
     .unwrap();
     isolation.checkout = Some(acquired.id);
     store.upsert(agent.clone());

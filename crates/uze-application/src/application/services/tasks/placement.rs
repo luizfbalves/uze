@@ -146,16 +146,18 @@ impl Workspace<'_> {
                 base_tip.clone(),
                 target.clone(),
             );
+            let owner = agent.id.clone();
             let isolation = agent
                 .isolation_mut()
                 .expect("an agent built isolated carries its isolation");
             let acquired = match checkout::acquire(
                 &primary,
                 store,
+                &owner,
                 isolation,
                 &base_tip,
                 policy.slots,
-                &checkout::Presence::observe_with(occupied),
+                &|| checkout::Presence::observe_with(occupied),
             ) {
                 Ok(acquired) => acquired,
                 // Nothing was taken, and the reconciliation above is
@@ -271,10 +273,11 @@ impl Workspace<'_> {
             let acquired = match checkout::acquire(
                 &primary,
                 store,
+                &id,
                 &isolation,
                 &base_tip,
                 policy.slots,
-                &checkout::Presence::observe_with(occupied),
+                &|| checkout::Presence::observe_with(occupied),
             ) {
                 Ok(acquired) => acquired,
                 Err(refusal) => return Ok(Err(refusal.to_string())),
@@ -349,7 +352,7 @@ impl Workspace<'_> {
             .repository_context(cwd)?
             .ok_or_else(|| UzeError::UnknownTask(task_id.to_owned()))?;
         let target = target_of(&primary, &policy);
-        let presence = checkout::Presence::observe_with(occupied);
+        let observe = || checkout::Presence::observe_with(occupied);
         let mut acquired_slot = None;
         let mut restored: Vec<(String, String)> = Vec::new();
         let mut placement = task::locked(&self.0.home, &primary, |store| {
@@ -409,7 +412,7 @@ impl Workspace<'_> {
                 &id,
                 task,
                 policy.slots,
-                &presence,
+                &observe,
                 fresh.as_deref(),
             )
             .map_err(|error| UzeError::ResumeFailed(error.to_string()))?;
@@ -432,7 +435,7 @@ impl Workspace<'_> {
             // and a slot left holding restored work under a record that
             // never names it would be adopted and shelved again as a task
             // of its own, while the shelf it came from still stands.
-            match resume_children(&primary, store, &id, policy.slots, &presence, &mut taken) {
+            match resume_children(&primary, store, &id, policy.slots, &observe, &mut taken) {
                 Ok(children) => restored.extend(children),
                 Err(error) => {
                     for slot in &taken {
@@ -462,6 +465,11 @@ impl Workspace<'_> {
         if let Some(acquired) = acquired_slot {
             let consent = self.consent(&primary, &policy);
             placement.warnings = checkout::materialize(&primary, &acquired.path, &consent);
+            if acquired.displaced {
+                placement
+                    .warnings
+                    .insert(0, checkout::CONVERSATION_NOT_CARRIED.to_owned());
+            }
             placement.awaiting_approval = awaiting(&primary, &consent, &acquired.path);
         }
         placement.view = self.placed_view(&primary, placement.placement.agent().as_str(), &policy);
@@ -533,7 +541,7 @@ fn resume_children(
     store: &mut AgentStore,
     parent: &AgentId,
     cap: Option<usize>,
-    presence: &checkout::Presence,
+    observe: &dyn Fn() -> checkout::Presence,
     taken: &mut Vec<PathBuf>,
 ) -> Result<Vec<(String, String)>> {
     let mut restored = Vec::new();
@@ -559,7 +567,7 @@ fn resume_children(
             continue;
         }
         let acquired =
-            checkout::resume(primary, &current, &child_id, isolation, cap, presence, None)
+            checkout::resume(primary, &current, &child_id, isolation, cap, observe, None)
                 .map_err(|error| UzeError::ResumeFailed(error.to_string()))?;
         taken.push(acquired.path.clone());
         checkout::record::write(

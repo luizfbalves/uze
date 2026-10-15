@@ -3,6 +3,7 @@
 
 use std::time::{Duration, SystemTime};
 
+use uze_core::path::Canonical as _;
 use uze_testkit::git::Repository;
 
 use super::*;
@@ -29,9 +30,10 @@ fn launch(repository: &Repository, store: &mut AgentStore, label: &str) -> (Agen
         TARGET.into(),
     );
     agent.label = label.to_owned();
+    let owner = agent.id.clone();
     let isolation = agent.isolation_mut().unwrap();
     let base = isolation.base_commit.clone();
-    let acquired = acquire(primary, store, isolation, &base, None, &nobody()).unwrap();
+    let acquired = acquire(primary, store, &owner, isolation, &base, None, &nobody).unwrap();
     isolation.checkout = Some(acquired.id.clone());
     store.upsert(agent.clone());
     (agent, acquired)
@@ -40,7 +42,7 @@ fn launch(repository: &Repository, store: &mut AgentStore, label: &str) -> (Agen
 /// Ends `agent` the way the occupancy sweep does, and records it.
 fn end(repository: &Repository, store: &mut AgentStore, agent: &Agent) -> Released {
     let mut ended = store.get(&agent.id).unwrap().clone();
-    let released = release(repository.root(), &mut ended, TARGET, &nobody());
+    let released = release(repository.root(), &mut ended, TARGET, &nobody);
     store.upsert(ended);
     released
 }
@@ -163,6 +165,7 @@ fn a_slot_whose_git_file_was_repointed_is_no_longer_anyones_slot() {
             parent: Some(agent.id.clone()),
             split_at: Some("--exec=true".to_owned()),
             pinned: None,
+            moving_to: None,
         })
         .unwrap(),
     )
@@ -502,7 +505,7 @@ mod derived_content {
 
         assert_eq!(end(&repository, &mut store, &agent), FREED);
         let (_, next) = launch(&repository, &mut store, "next");
-        assert_eq!(next.path, slot.path);
+        super::assert_moved_from(&slot.path, &next);
         assert_eq!(
             fs::read_to_string(next.path.join("agents.lock")).unwrap(),
             LOCK,
@@ -563,7 +566,7 @@ mod derived_content {
 
         let (_, next) = launch(&repository, &mut store, "next");
 
-        assert_eq!(next.path, slot.path);
+        super::assert_moved_from(&slot.path, &next);
         assert_eq!(
             fs::read_to_string(next.path.join("AGENTS.md")).unwrap(),
             moved,
@@ -716,7 +719,7 @@ mod in_use {
         let mut store = AgentStore::default();
         let (agent, slot) = launch(&repository, &mut store, "left");
         end(&repository, &mut store, &agent);
-        let somebody = Presence::Known(vec![slot.path.join("src")]);
+        let somebody = Presence::Known(vec![Occupant::somebody(slot.path.join("src"))]);
 
         assert_eq!(
             slots(primary, &store, &somebody)[0].state,
@@ -741,14 +744,14 @@ mod in_use {
             slots(primary, &store, &Presence::Unknown)[0].state,
             SlotState::Free
         );
-        let (_, next) = acquire_for(&repository, &store, &Presence::Unknown);
+        let (_, next) = acquire_for(&repository, &store, &|| Presence::Unknown);
         assert!(next.created);
     }
 
     fn acquire_for(
         repository: &Repository,
         store: &AgentStore,
-        presence: &Presence,
+        observe: &dyn Fn() -> Presence,
     ) -> (Agent, Acquired) {
         let primary = repository.root();
         let agent = Agent::isolated(
@@ -762,12 +765,122 @@ mod in_use {
         let acquired = acquire(
             primary,
             store,
+            &agent.id,
             isolation,
             &isolation.base_commit,
             None,
-            presence,
+            observe,
         )
         .unwrap();
         (agent, acquired)
     }
+}
+
+/// A move recorded as intended names the checkout's new path before Git
+/// renames it, so a crash in between never disowns the checkout there —
+/// while a copy, which nothing was moving to, is still nobody's.
+#[test]
+fn a_checkout_mid_move_is_recognised_at_its_new_path_and_a_copy_is_not() {
+    let repository = repository("record-moving");
+    let primary = repository.root();
+    let mut store = AgentStore::default();
+    let (_, slot) = launch(&repository, &mut store, "moving");
+    let target = primary.join(WORKTREES_DIRECTORY).join("moved-agent");
+    let mut intent = match record::read(primary, &slot.path) {
+        Recorded::Ours(record) => record,
+        other => panic!("the slot is ours: {other:?}"),
+    };
+    intent.moving_to = Some(target.clone());
+    record::write(primary, &slot.path, &intent).unwrap();
+    repository.git(&[
+        "worktree",
+        "move",
+        &slot.path.to_string_lossy(),
+        &target.to_string_lossy(),
+    ]);
+
+    assert!(matches!(record::read(primary, &target), Recorded::Ours(_)));
+    let copy = primary.join("copy");
+    fs::create_dir_all(&copy).unwrap();
+    fs::copy(target.join(".git"), copy.join(".git")).unwrap();
+    assert_eq!(record::read(primary, &copy), Recorded::Absent);
+}
+
+/// Git renames the directory before it rewrites the links to it. A crash
+/// there leaves a checkout its repository registers at the old path; the
+/// settling pass repairs it at the intended one and makes the record name
+/// it, so the prune that follows takes nothing.
+#[test]
+fn a_move_interrupted_inside_git_is_repaired_before_anything_is_pruned() {
+    let repository = repository("record-move-crash");
+    let primary = repository.root();
+    let mut store = AgentStore::default();
+    let (_, slot) = launch(&repository, &mut store, "crashed");
+    let target = primary.join(WORKTREES_DIRECTORY).join("crashed-agent");
+    let mut intent = match record::read(primary, &slot.path) {
+        Recorded::Ours(record) => record,
+        other => panic!("the slot is ours: {other:?}"),
+    };
+    intent.moving_to = Some(target.clone());
+    record::write(primary, &slot.path, &intent).unwrap();
+    // The rename alone, the way Git's own move begins.
+    fs::rename(&slot.path, &target).unwrap();
+    assert!(
+        anchored(primary, &target).is_err(),
+        "the links still name the old path"
+    );
+
+    record::settle_moves(primary);
+    repository.git(&["worktree", "prune"]);
+
+    assert!(anchored(primary, &target).is_ok());
+    match record::read(primary, &target) {
+        Recorded::Ours(record) => {
+            assert!(record.moving_to.is_none());
+            assert_eq!(
+                record.path.canonical().unwrap(),
+                target.canonical().unwrap()
+            );
+        }
+        other => panic!("the moved checkout is still ours: {other:?}"),
+    }
+}
+
+/// An intent whose move never happened is withdrawn, and the checkout stays
+/// the system's where it is.
+#[test]
+fn a_move_that_never_happened_is_withdrawn() {
+    let repository = repository("record-move-never");
+    let primary = repository.root();
+    let mut store = AgentStore::default();
+    let (_, slot) = launch(&repository, &mut store, "stayed");
+    let mut intent = match record::read(primary, &slot.path) {
+        Recorded::Ours(record) => record,
+        other => panic!("the slot is ours: {other:?}"),
+    };
+    intent.moving_to = Some(primary.join(WORKTREES_DIRECTORY).join("never-made"));
+    record::write(primary, &slot.path, &intent).unwrap();
+
+    record::settle_moves(primary);
+
+    match record::read(primary, &slot.path) {
+        Recorded::Ours(record) => assert!(record.moving_to.is_none()),
+        other => panic!("the slot is still ours: {other:?}"),
+    }
+}
+
+/// `taken` is the slot that stood at `before`, renamed to its new agent's
+/// name: reused, never created, and gone from where it was.
+fn assert_moved_from(before: &Path, taken: &Acquired) {
+    assert!(!taken.created, "the free slot is taken, not a new one");
+    assert!(
+        !before.exists(),
+        "{} was renamed, not copied",
+        before.display()
+    );
+    assert_eq!(
+        taken.path.file_name().and_then(|name| name.to_str()),
+        Some(taken.id.as_str()),
+        "and it carries its new agent's name"
+    );
 }

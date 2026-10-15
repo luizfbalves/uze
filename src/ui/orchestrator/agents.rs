@@ -113,7 +113,7 @@ impl WorkspaceModel {
     }
 
     /// Work no live agent tab is in front of, wherever on this machine it
-    /// is — what the preserved-work list shows.
+    /// is — what recent lists.
     ///
     /// Answered by a sweep of every project UZE has recorded, not by the
     /// per-session evaluation cache beside it: that cache is filled only
@@ -123,12 +123,15 @@ impl WorkspaceModel {
     /// Liveness is still this client's own question, asked by launch stamp:
     /// the service hands over everything still preserved and the tabs
     /// standing in front of an agent are what subtracts.
-    pub(in crate::ui) fn preserved_tasks(&self) -> Vec<uze_application::PreservedWork> {
+    ///
+    /// Asked for every frame recent is drawn, so the live agents are
+    /// gathered once rather than looked up per piece of work.
+    pub(in crate::ui) fn preserved_tasks(&self) -> Vec<&uze_application::PreservedWork> {
+        let live: BTreeSet<&str> = self.tabs().filter_map(launched_agent_id).collect();
         self.remembered
             .preserved_work
             .iter()
-            .filter(|work| self.pane_for_agent(&work.id).is_none())
-            .cloned()
+            .filter(|work| !live.contains(work.id.as_str()))
             .collect()
     }
 

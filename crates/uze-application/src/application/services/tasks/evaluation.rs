@@ -385,7 +385,13 @@ impl EvaluationPass<'_> {
             && !checkout::name_is_taken(primary, &derived)
             && checkout::rename_branch(primary, &isolation.branch.clone(), &derived).is_ok()
         {
+            // A label the operator typed is a name somebody chose, and the
+            // branch being named after the commit does not take it away.
+            let chosen = agent.has_chosen_label().then(|| agent.label.clone());
             agent.take_name(derived);
+            if let Some(label) = chosen {
+                agent.label = label;
+            }
         }
     }
 }

@@ -18,9 +18,23 @@ impl Attach<'_> {
     /// up, where the picker would be a single row to confirm, and the agent
     /// starts at once. None set up still opens it: its one row is the way
     /// to setting one up.
+    ///
+    /// A resumed agent that names the harness it ran with is launched with
+    /// it at once while that harness is still set up: its conversation is
+    /// that harness's, and asking would only offer the chance to lose it.
     pub(super) fn offer_agents(&mut self, anchor: Rect, resume: Option<ResumeTarget>) {
         let mut options = agent_options(self.home);
-        if options.len() == 1 {
+        let previous = resume
+            .as_ref()
+            .and_then(|resume| resume.harness.as_deref())
+            .and_then(|harness| {
+                options
+                    .iter()
+                    .position(|option| option.integration == harness)
+            });
+        if let Some(previous) = previous {
+            self.start_agent(options.remove(previous), resume);
+        } else if options.len() == 1 {
             self.start_agent(options.remove(0), resume);
         } else {
             self.model.agent_picker = Some(AgentPicker {
@@ -158,13 +172,6 @@ impl Attach<'_> {
             }
             Action::IsolateAgentAtCommit => {
                 self.isolate_agent(target, uze_application::Carry::Nothing)
-            }
-            Action::ShowSpaceWork => {
-                if let MenuTarget::Space(space) = target
-                    && let Some(root) = self.model.space_root(space)
-                {
-                    self.open_work(Some(uze_application::slot_key(&root)));
-                }
             }
             _ => dispatch_menu_action(
                 &mut self.stream,
@@ -455,9 +462,9 @@ impl Attach<'_> {
 fn unfinished_detail(labels: &[&str]) -> Option<String> {
     match labels {
         [] => None,
-        [only] => Some(format!("{only} is unfinished — reopen with alt+p")),
+        [only] => Some(format!("{only} is unfinished — find it in recent, alt+p")),
         many => Some(format!(
-            "{} agents are unfinished — reopen with alt+p",
+            "{} agents are unfinished — find them in recent, alt+p",
             many.len()
         )),
     }

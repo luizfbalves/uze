@@ -11,6 +11,33 @@ pub(super) fn is_unisolated(cwd: &Path) -> bool {
     !uze_application::is_isolated_checkout(cwd)
 }
 
+/// The header's name, which is the way in and out of recent; open, it
+/// reads `work › recent`.
+///
+/// Answers the columns of the name, the control: it answers the pointer the
+/// way the header's other controls do, brighter under it and brightest
+/// while pressed.
+pub(super) fn sidebar_title(model: &WorkspaceModel) -> (Vec<Span<'static>>, (u16, u16)) {
+    let name_hue = match chip_state(model, Some(WorkspaceHit::ToggleRecent)) {
+        ChipState::Pressed => Token::TextBright,
+        ChipState::Hovered => Token::TextPrimary,
+        ChipState::Resting | ChipState::Static => Token::TextMuted,
+    };
+    let mut title = vec![
+        Span::raw(" ".repeat(TRAILING_PAD as usize)),
+        Span::styled("work", theme::fg_bold(name_hue)),
+    ];
+    let name = (TRAILING_PAD, Span::raw("work").width() as u16);
+    if model.recent.open {
+        title.push(Span::styled(
+            format!(" {} ", theme::glyph(Symbol::ChevronRight)),
+            theme::fg(Token::TextFaint),
+        ));
+        title.push(Span::styled("recent", theme::fg_bold(Token::TextBright)));
+    }
+    (title, name)
+}
+
 /// The hue an agent's caption line is drawn in: dim, like every other
 /// detail, except under the agent actually receiving keystrokes — whose
 /// whole item, both rows of it, is what every command in the footer would
@@ -92,13 +119,12 @@ pub(in crate::ui::orchestrator) fn render_sidebar(
         // One column in, the pad its controls keep at the other end: the
         // header is the column's own chrome, and a name flush against the
         // edge under a right-hand pad reads as a row that slipped.
-        frame.render_widget(
-            Paragraph::new(Span::styled(
-                format!("{}work", " ".repeat(TRAILING_PAD as usize)),
-                theme::fg_bold(Token::TextMuted),
-            )),
-            rect,
-        );
+        let (title, (start, width)) = sidebar_title(model);
+        frame.render_widget(Paragraph::new(Line::from(title)), rect);
+        hits.push((
+            Rect::new(rect.x + start, rect.y, width, 1),
+            WorkspaceHit::ToggleRecent,
+        ));
         let more = theme::glyph(Symbol::Manage);
         let more_width = theme::width(Symbol::Manage);
         // One column off the divider, the same pad every row of this column
@@ -138,15 +164,19 @@ pub(in crate::ui::orchestrator) fn render_sidebar(
             new_width,
             1,
         );
-        frame.render_widget(
-            Paragraph::new(Span::styled(new, theme::fg_bold(new_hue))),
-            new_rect,
-        );
-        frame.render_widget(
-            Paragraph::new(Span::styled(divider, theme::fg(Token::SurfaceHover))),
-            Rect::new(new_rect.right() + HEADER_GAP, rect.y, divider_width, 1),
-        );
-        hits.push((new_rect, WorkspaceHit::NewSpace));
+        // Recent adds nothing to the tree, so the control that grows the
+        // tree has nothing to act on while it is open.
+        if !model.recent.open {
+            frame.render_widget(
+                Paragraph::new(Span::styled(new, theme::fg_bold(new_hue))),
+                new_rect,
+            );
+            frame.render_widget(
+                Paragraph::new(Span::styled(divider, theme::fg(Token::SurfaceHover))),
+                Rect::new(new_rect.right() + HEADER_GAP, rect.y, divider_width, 1),
+            );
+            hits.push((new_rect, WorkspaceHit::NewSpace));
+        }
         // Never a button: only the mark's own colour answers the pointer
         // — muted at rest, beside a label of the same weight, brighter
         // under the hover and brightest while pressed.
@@ -218,6 +248,12 @@ pub(in crate::ui::orchestrator) fn render_sidebar(
     // where the spaces it would join stand. Closing it brings them back.
     if let Some(picker) = &model.root_picker {
         render_root_picker(frame, picker, &mut rows, hits);
+        return;
+    }
+    // Recent stands where the tree stands, for the same reason: two lists
+    // of agents side by side, neither would read as the one being walked.
+    if model.recent.open {
+        render_recent(frame, model, &mut rows, hits, metrics);
         return;
     }
 
@@ -1113,7 +1149,7 @@ pub(in crate::ui::orchestrator) const FIRST_STEPS: [Action; 6] = [
     Action::NextAgent,
     Action::ToggleChanges,
     Action::ToggleFiles,
-    Action::ToggleWork,
+    Action::ToggleRecent,
     Action::OpenActionIndex,
 ];
 

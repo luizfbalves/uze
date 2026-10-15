@@ -21,6 +21,10 @@ use uze_application::{CheckoutOwner, CheckoutView, CheckoutsView, JoinedWork, Pr
 #[derive(Default)]
 pub(super) struct Recent {
     pub(super) open: bool,
+    /// Whether a click elsewhere handed the keyboard back while recent
+    /// stays drawn: it is opened and closed by its own control, so using
+    /// the rest of the workspace never costs a click to leave it first.
+    pub(super) keys_elsewhere: bool,
     /// The selected row, by [`RecentRow::key`]: an index would land on a
     /// different agent once the list under it changed.
     pub(super) selected: Option<String>,
@@ -43,6 +47,13 @@ pub(super) struct Recent {
     /// A press on that scrollbar's handle, until the first movement says
     /// whether it scrolls the list or moves the divider.
     pub(super) grab: Option<EdgeDrag>,
+    /// The words the rows are narrowed by, matched against each row's
+    /// name, branch, project and state.
+    pub(super) filter: String,
+    /// Whether the search is taking what is typed.
+    pub(super) filtering: bool,
+    /// Whether agents nobody named are listed too.
+    pub(super) show_all: bool,
 }
 
 /// What a frame of recent settled on: where the list ended up scrolled,
@@ -63,6 +74,11 @@ pub(super) struct ProjectRead {
 }
 
 impl Recent {
+    /// Whether recent is open and the keyboard is its.
+    pub(super) fn has_keys(&self) -> bool {
+        self.open && !self.keys_elsewhere
+    }
+
     fn view(&self, project: &Path) -> Option<&CheckoutsView> {
         self.reads.get(project)?.answer.as_ref()?.as_ref()
     }
@@ -179,6 +195,9 @@ pub(super) struct RecentRow {
     pub(super) changed: Option<SystemTime>,
     pub(super) task: Option<PreservedWork>,
     pub(super) join: Option<Join>,
+    /// Whether somebody named it. A subagent's row is its topic, which is
+    /// a name by construction.
+    pub(super) named: bool,
 }
 
 impl RecentRow {
@@ -201,6 +220,7 @@ impl RecentRow {
                 .or(Some(active)),
             task: Some(task.clone()),
             join: checkout.and_then(join_of),
+            named: task.named,
         }
     }
 
@@ -216,7 +236,22 @@ impl RecentRow {
             changed: checkout.last_changed,
             task: None,
             join: Some(join),
+            named: true,
         }
+    }
+
+    /// Whether `needle`, already lowercased, is in anything the row says:
+    /// its name, its branch, its project or its state.
+    fn matches(&self, needle: &str) -> bool {
+        [
+            Some(self.name.clone()),
+            self.branch.clone(),
+            Some(project_name(&self.project)),
+            Some(self.reason.words()),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|said| said.to_lowercase().contains(needle))
     }
 
     /// What enter does to this row, by the word the foot names it with.
@@ -342,9 +377,21 @@ fn unnamed_joins<'a>(
         .filter_map(|(primary, checkout)| Some((primary, checkout, join_of(checkout)?)))
 }
 
-/// Every row in the order it is drawn and walked: what waits on the
-/// operator first, then the rest, each most recently changed first.
+/// Every row in the order it is drawn and walked, narrowed to what the
+/// search and the named-only default let through.
 pub(super) fn recent_rows(model: &WorkspaceModel) -> Vec<RecentRow> {
+    let recent = &model.recent;
+    let needle = recent.filter.trim().to_lowercase();
+    every_recent_row(model)
+        .into_iter()
+        .filter(|row| recent.show_all || row.named)
+        .filter(|row| needle.is_empty() || row.matches(&needle))
+        .collect()
+}
+
+/// Every row before any narrowing: what waits on the operator first, then
+/// the rest, each most recently changed first.
+pub(super) fn every_recent_row(model: &WorkspaceModel) -> Vec<RecentRow> {
     let recent = &model.recent;
     let kept = model.preserved_tasks();
     let mut rows: Vec<RecentRow> = kept

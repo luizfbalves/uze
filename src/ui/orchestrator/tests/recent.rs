@@ -79,7 +79,11 @@ fn showing(kept: Vec<PreservedWork>, checkouts: Vec<CheckoutView>) -> WorkspaceM
 }
 
 fn sidebar_buffer(model: &WorkspaceModel, height: u16) -> ratatui::buffer::Buffer {
-    let mut terminal = Terminal::new(TestBackend::new(44, height)).unwrap();
+    sidebar_buffer_at(model, 44, height)
+}
+
+fn sidebar_buffer_at(model: &WorkspaceModel, width: u16, height: u16) -> ratatui::buffer::Buffer {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal
         .draw(|frame| {
             render_sidebar(
@@ -96,7 +100,11 @@ fn sidebar_buffer(model: &WorkspaceModel, height: u16) -> ratatui::buffer::Buffe
 }
 
 fn drawn(model: &WorkspaceModel) -> Vec<String> {
-    let buffer = sidebar_buffer(model, 30);
+    drawn_at(model, 44)
+}
+
+fn drawn_at(model: &WorkspaceModel, width: u16) -> Vec<String> {
+    let buffer = sidebar_buffer_at(model, width, 30);
     (0..buffer.area.height)
         .map(|row| {
             (0..buffer.area.width)
@@ -432,6 +440,54 @@ fn the_toggle_opens_recent_reads_its_projects_and_keeps_the_selection() {
     assert!(!driven.attach.model.recent.open, "the same key closes it");
 }
 
+#[test]
+fn the_manage_mark_opens_manage_in_one_click_while_recent_is_open() {
+    let home = UzeHome::at(uze_testkit::temp::scratch("orchestrator-recent-manage"));
+    let mut driven = driven(
+        showing(
+            vec![preserved(PROJECT, "a", "one", WorkStateView::Ready)],
+            Vec::new(),
+        ),
+        &home,
+    );
+    driven.frame();
+    let more = driven.hit(|hit| *hit == WorkspaceHit::OpenManage);
+
+    driven.press(more.x, more.y);
+    assert!(driven.attach.model.recent.open);
+    assert!(driven.attach.model.manage.is_some());
+}
+
+/// Recent is opened and closed by its own control: a click in the pane
+/// reaches the pane and hands it the keyboard, recent stays drawn, and a
+/// click back in its column gives the keyboard back to it.
+#[test]
+fn a_click_elsewhere_keeps_recent_open_and_hands_the_keys_back() {
+    let home = UzeHome::at(uze_testkit::temp::scratch("orchestrator-recent-elsewhere"));
+    let mut driven = driven(
+        showing(
+            vec![preserved(PROJECT, "a", "one", WorkStateView::Ready)],
+            Vec::new(),
+        ),
+        &home,
+    );
+    driven.frame();
+    press(&mut driven, Action::DiscardTask);
+    assert!(driven.attach.model.recent.asking);
+    let in_the_pane = 70;
+
+    driven.press(in_the_pane, 10);
+    assert!(driven.attach.model.recent.open, "recent stays open");
+    assert!(!driven.attach.model.recent.has_keys());
+    assert!(
+        !driven.attach.model.recent.asking,
+        "its question is withdrawn"
+    );
+
+    driven.press(2, 16);
+    assert!(driven.attach.model.recent.has_keys());
+}
+
 /// The question opens on its way out, so the enter that opened nothing
 /// by habit takes nothing either; the arrow moves onto going ahead.
 #[test]
@@ -762,10 +818,56 @@ fn a_read_of_a_directory_below_the_root_is_kept_under_the_primary() {
     assert!(driven.attach.model.recent.covers(&below));
 }
 
+/// The foot is one line with the two keys that matter on the row:
+/// escape leaves every surface alike and delivering is in the action
+/// index, so neither takes the room the two need.
 #[test]
-fn with_nothing_kept_it_says_so() {
+fn the_foot_offers_resume_and_discard_on_one_line() {
+    let mut model = showing(
+        vec![preserved(PROJECT, "a", "one", WorkStateView::Ready)],
+        Vec::new(),
+    );
+    model.recent.selected = Some("a".to_owned());
+    let lines = drawn(&model);
+    let foot = &lines[row_of(&lines, "enter resume")];
+    assert!(foot.contains("d discard"), "{foot:?}");
+    assert!(
+        !foot.contains("deliver") && !foot.contains("close"),
+        "{foot:?}"
+    );
+}
+
+/// The selected row wears the thin bar the space tree's row in front
+/// wears, down every line of it; the others leave the column empty.
+#[test]
+fn the_selected_row_wears_the_trees_thin_bar() {
+    let mut model = showing(
+        vec![
+            preserved(PROJECT, "a", "one", WorkStateView::Ready),
+            preserved(PROJECT, "b", "two", WorkStateView::Ready),
+        ],
+        Vec::new(),
+    );
+    model.recent.selected = Some("a".to_owned());
+    let lines = drawn(&model);
+    let bar = crate::ui::theme::glyph(crate::ui::theme::Symbol::BarThin);
+    let selected = row_of(&lines, "one");
+    assert!(lines[selected].starts_with(&bar), "{lines:?}");
+    assert!(lines[selected + 1].starts_with(&bar), "{lines:?}");
+    assert!(!lines[row_of(&lines, "two")].starts_with(&bar), "{lines:?}");
+}
+
+#[test]
+fn with_nothing_kept_it_says_so_in_a_title_alone() {
     let model = showing(Vec::new(), Vec::new());
-    row_of(&drawn(&model), "nothing kept");
+    let lines = drawn(&model);
+    let title = &lines[row_of(&lines, "nothing kept yet")];
+    let before = title.find("nothing").unwrap();
+    assert!(before > 2, "the title is centred: {title:?}");
+    assert!(
+        !lines.iter().any(|line| line.contains("picked up again")),
+        "{lines:?}"
+    );
 }
 
 #[test]
@@ -777,4 +879,141 @@ fn recent_draws_on_a_small_terminal_without_panicking() {
     for height in 1..8 {
         sidebar_buffer(&model, height);
     }
+}
+
+fn names(model: &WorkspaceModel) -> Vec<String> {
+    recent_rows(model).into_iter().map(|row| row.name).collect()
+}
+
+fn type_into(driven: &mut super::workspace_tests::Driven<'_>, text: &str) {
+    for character in text.chars() {
+        let chord = uze_keys::Chord::parse(&character.to_string()).unwrap();
+        driven.press_key(key_event(chord));
+    }
+}
+
+/// An agent nobody named is known by its generated id, so recent lists
+/// the named ones until asked for every agent, and asking again goes back.
+#[test]
+fn recent_lists_named_work_until_asked_for_every_agent() {
+    let home = UzeHome::at(uze_testkit::temp::scratch("orchestrator-recent-named"));
+    let unnamed = PreservedWork {
+        named: false,
+        ..preserved(PROJECT, "x1y2z3", "x1y2z3", WorkStateView::Ready)
+    };
+    let mut driven = driven(
+        showing(
+            vec![
+                preserved(PROJECT, "a", "parser", WorkStateView::Ready),
+                unnamed,
+            ],
+            Vec::new(),
+        ),
+        &home,
+    );
+    assert_eq!(names(&driven.attach.model), ["parser"]);
+
+    press(&mut driven, Action::ToggleAllWork);
+    assert_eq!(names(&driven.attach.model).len(), 2);
+
+    press(&mut driven, Action::ToggleAllWork);
+    assert_eq!(names(&driven.attach.model), ["parser"]);
+}
+
+/// The search narrows by anything a row says — its name, its branch, its
+/// project, its state — walks what it let through, and esc takes the
+/// words away with it.
+#[test]
+fn the_search_narrows_by_what_a_row_says_and_esc_clears_it() {
+    let home = UzeHome::at(uze_testkit::temp::scratch("orchestrator-recent-search"));
+    let mut driven = driven(
+        showing(
+            vec![
+                preserved(PROJECT, "a", "parser", WorkStateView::Ready),
+                preserved(OTHER, "b", "lexer", WorkStateView::Shelved),
+            ],
+            Vec::new(),
+        ),
+        &home,
+    );
+    press(&mut driven, Action::StartFilter);
+    assert!(driven.attach.model.recent.filtering);
+
+    type_into(&mut driven, "LEX");
+    assert_eq!(names(&driven.attach.model), ["lexer"], "by name, any case");
+    driven.press_key(key_event(uze_keys::Chord::parse("backspace").unwrap()));
+    driven.press_key(key_event(uze_keys::Chord::parse("backspace").unwrap()));
+    driven.press_key(key_event(uze_keys::Chord::parse("backspace").unwrap()));
+    type_into(&mut driven, "agent/a");
+    assert_eq!(names(&driven.attach.model), ["parser"], "by branch");
+    driven.attach.model.recent.filter = "other".to_owned();
+    assert_eq!(names(&driven.attach.model), ["lexer"], "by project");
+    driven.attach.model.recent.filter = "ready to deliver".to_owned();
+    assert_eq!(names(&driven.attach.model), ["parser"], "by state");
+
+    press(&mut driven, Action::Dismiss);
+    assert!(!driven.attach.model.recent.filtering);
+    assert!(driven.attach.model.recent.filter.is_empty());
+    assert!(
+        driven.attach.model.recent.open,
+        "esc left the search, not recent"
+    );
+}
+
+/// The letters typed into the search are the search's: `a` is a letter
+/// there, not the key that lists every agent.
+#[test]
+fn a_letter_typed_into_the_search_is_never_a_key() {
+    let home = UzeHome::at(uze_testkit::temp::scratch("orchestrator-recent-letter"));
+    let mut driven = driven(
+        showing(
+            vec![preserved(PROJECT, "a", "parser", WorkStateView::Ready)],
+            Vec::new(),
+        ),
+        &home,
+    );
+    press(&mut driven, Action::StartFilter);
+    type_into(&mut driven, "ad");
+    assert_eq!(driven.attach.model.recent.filter, "ad");
+    assert!(!driven.attach.model.recent.show_all);
+    assert!(!driven.attach.model.recent.asking);
+}
+
+/// The search row leads the column with its key, and the key that lists
+/// every agent sits beside it; with the unnamed left out and none named,
+/// the list says so rather than that nothing was kept.
+#[test]
+fn the_search_row_leads_recent_with_the_key_beside_it() {
+    let model = showing(
+        vec![PreservedWork {
+            named: false,
+            ..preserved(PROJECT, "x1y2z3", "x1y2z3", WorkStateView::Ready)
+        }],
+        Vec::new(),
+    );
+    let lines = drawn(&model);
+    let search = &lines[row_of(&lines, "search")];
+    assert!(search.contains('/'), "{search:?}");
+    assert!(search.contains("a all"), "{search:?}");
+    row_of(&lines, "nothing named yet");
+}
+
+/// A click selects a row and nothing more, however often it lands: only
+/// enter resumes, so a second click never launches an agent by accident.
+#[test]
+fn a_click_on_the_selected_row_only_selects_it() {
+    let home = UzeHome::at(uze_testkit::temp::scratch("orchestrator-recent-click"));
+    let mut driven = driven(
+        showing(
+            vec![preserved(PROJECT, "a", "parser", WorkStateView::Shelved)],
+            Vec::new(),
+        ),
+        &home,
+    );
+    driven.attach.click_recent_row(0);
+    driven.attach.click_recent_row(0);
+    assert_eq!(driven.attach.model.recent.selected.as_deref(), Some("a"));
+    assert!(driven.attach.model.agent_picker.is_none());
+    assert!(!driven.attach.model.placement_pending);
+    assert!(driven.attach.model.recent.open);
 }

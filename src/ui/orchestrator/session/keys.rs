@@ -34,7 +34,9 @@ impl Attach<'_> {
             Scope::Rename
         } else if self.model.agent_picker.is_some() {
             Scope::AgentPicker
-        } else if self.model.recent.open {
+        } else if self.model.recent.has_keys() && self.model.recent.filtering {
+            Scope::RecentFilter
+        } else if self.model.recent.has_keys() {
             Scope::Recent
         } else if self.model.context_menu.is_some() {
             Scope::ContextMenu
@@ -71,7 +73,7 @@ impl Attach<'_> {
     /// recent's selected row offers, or, over the pane or a surface
     /// standing in it, delivering every task of the space.
     fn offered_without_a_key(&self) -> Vec<Action> {
-        if self.model.recent.open {
+        if self.model.recent.has_keys() {
             return recent_offered(&self.model);
         }
         let in_the_pane = self.scopes().last() == Some(&Scope::Surfaces);
@@ -144,7 +146,7 @@ impl Attach<'_> {
         } else if self.model.context_menu.is_some() {
             self.model.context_menu = None;
             self.model.dirty = true;
-        } else if self.model.recent.open {
+        } else if self.model.recent.has_keys() {
             // A key that is not the confirmation withdraws the question.
             self.model.recent.asking = false;
             self.model.dirty = true;
@@ -162,6 +164,8 @@ impl Attach<'_> {
             picker.typed(character);
         } else if let Some((_, buffer)) = self.model.renaming.as_mut() {
             buffer.insert(character);
+        } else if self.model.recent.has_keys() && self.model.recent.filtering {
+            self.model.recent.filter.push(character);
         } else if self
             .model
             .code
@@ -273,7 +277,7 @@ impl Attach<'_> {
             self.agent_picker_action(action);
             return Flow::Continue;
         }
-        if self.model.recent.open {
+        if self.model.recent.has_keys() {
             self.recent_action(action);
             return Flow::Continue;
         }

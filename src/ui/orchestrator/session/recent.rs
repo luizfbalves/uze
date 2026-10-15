@@ -9,6 +9,7 @@ impl Attach<'_> {
     /// the new one is out.
     pub(in crate::ui::orchestrator) fn open_recent(&mut self) {
         self.model.recent.open = true;
+        self.model.recent.keys_elsewhere = false;
         self.model.recent.asking = false;
         self.sweep_preserved_work();
         for project in projects_to_read(&self.model) {
@@ -19,8 +20,39 @@ impl Attach<'_> {
 
     pub(super) fn close_recent(&mut self) {
         self.model.recent.open = false;
+        self.model.recent.keys_elsewhere = false;
         self.model.recent.asking = false;
         self.model.dirty = true;
+    }
+
+    /// A press while recent is open gives it the keyboard when it lands in
+    /// the column recent stands in, and hands the keyboard back anywhere
+    /// else, withdrawing any question it was asking. Something drawn over
+    /// the workspace answers the press first and moves nothing: the action
+    /// index opened from recent still acts on recent's row.
+    pub(super) fn hand_recent_the_keys_or_not(&mut self, column: u16, sidebar: Rect) {
+        let model = &self.model;
+        let drawn_over = model.approval.is_some()
+            || model.release_notes.is_some()
+            || model.action_index.is_some()
+            || model.renaming.is_some()
+            || model.root_picker.is_some()
+            || model.agent_picker.is_some()
+            || model.support_dropdown.is_some()
+            || model.commit_detail_open()
+            || model.status_catalog.is_some();
+        if !model.recent.open || drawn_over {
+            return;
+        }
+        // A click anywhere but the search leaves it, on the words typed;
+        // a click on it starts it again.
+        self.model.recent.filtering = false;
+        let elsewhere = column >= sidebar.right();
+        if elsewhere != self.model.recent.keys_elsewhere {
+            self.model.recent.keys_elsewhere = elsewhere;
+            self.model.recent.asking &= !elsewhere;
+            self.model.dirty = true;
+        }
     }
 
     /// Everything asked of recent while it is open.
@@ -28,6 +60,11 @@ impl Attach<'_> {
         let rows = recent_rows(&self.model);
         let index = selected_index(&self.model.recent, &rows);
         let row = index.and_then(|index| rows.get(index)).cloned();
+        if self.model.recent.filtering {
+            self.recent_filter_action(action, &rows, index, row);
+            self.model.dirty = true;
+            return;
+        }
         if self.model.recent.asking {
             match action {
                 Action::FocusNext | Action::FocusPrevious => {
@@ -47,7 +84,13 @@ impl Attach<'_> {
             return;
         }
         match action {
+            // Esc takes the words away before it takes recent away.
+            Action::Dismiss if !self.model.recent.filter.is_empty() => {
+                self.model.recent.filter.clear();
+            }
             Action::ToggleRecent | Action::Dismiss => self.close_recent(),
+            Action::StartFilter => self.model.recent.filtering = true,
+            Action::ToggleAllWork => self.model.recent.show_all = !self.model.recent.show_all,
             Action::SelectNext | Action::SelectPrevious => {
                 let step = if action == Action::SelectNext { 1 } else { -1 };
                 self.step_recent(&rows, index, step);
@@ -69,6 +112,38 @@ impl Attach<'_> {
             _ => {}
         }
         self.model.dirty = true;
+    }
+
+    /// What a key does while the search takes text: the arrows walk what
+    /// it let through, enter leaves it on the words and acts on the row,
+    /// and esc leaves it with the words gone.
+    fn recent_filter_action(
+        &mut self,
+        action: Action,
+        rows: &[RecentRow],
+        index: Option<usize>,
+        row: Option<RecentRow>,
+    ) {
+        match action {
+            Action::EraseBack => {
+                self.model.recent.filter.pop();
+            }
+            Action::Dismiss => {
+                self.model.recent.filtering = false;
+                self.model.recent.filter.clear();
+            }
+            Action::SelectNext | Action::SelectPrevious => {
+                let step = if action == Action::SelectNext { 1 } else { -1 };
+                self.step_recent(rows, index, step);
+            }
+            Action::Activate => {
+                self.model.recent.filtering = false;
+                if let (Some(row), Some(index)) = (row, index) {
+                    self.act_on_recent_row(&row, index);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// A click on one of the question's answers: the same as walking to it
@@ -112,20 +187,16 @@ impl Attach<'_> {
         self.model.dirty = true;
     }
 
-    /// Selects the row `index` names: a click on the row already selected
-    /// does what enter would.
+    /// Selects the row `index` names, and only selects it: resuming
+    /// launches an agent, and a second click meant to select launched one
+    /// nobody asked for. Enter is the one way to act on a row.
     pub(in crate::ui::orchestrator) fn click_recent_row(&mut self, index: usize) {
         let rows = recent_rows(&self.model);
         let Some(row) = rows.get(index) else {
             return;
         };
-        let already = selected_index(&self.model.recent, &rows) == Some(index);
         self.model.recent.asking = false;
         self.model.recent.selected = Some(row.key.clone());
-        if already {
-            let row = row.clone();
-            self.act_on_recent_row(&row, index);
-        }
         self.model.dirty = true;
     }
 

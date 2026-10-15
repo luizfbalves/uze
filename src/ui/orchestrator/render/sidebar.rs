@@ -224,6 +224,14 @@ pub(in crate::ui::orchestrator) fn render_sidebar(
         return;
     };
 
+    // Recent stands where the tree stands: two lists of agents side by
+    // side, neither would read as the one being walked. Ahead of the blank
+    // row the cards open with, since its search row leads the column.
+    if model.recent.open {
+        render_recent(frame, model, &mut rows, hits, metrics);
+        return;
+    }
+
     // A blank row above each space, the first one included: each card
     // gets an edge on both sides, and it is also where a space being
     // dragged is shown landing (see `draw_space_drop`).
@@ -248,12 +256,6 @@ pub(in crate::ui::orchestrator) fn render_sidebar(
     // where the spaces it would join stand. Closing it brings them back.
     if let Some(picker) = &model.root_picker {
         render_root_picker(frame, picker, &mut rows, hits);
-        return;
-    }
-    // Recent stands where the tree stands, for the same reason: two lists
-    // of agents side by side, neither would read as the one being walked.
-    if model.recent.open {
-        render_recent(frame, model, &mut rows, hits, metrics);
         return;
     }
 
@@ -912,6 +914,12 @@ pub(super) fn render_space_caption(
     row::pad_to(&mut spans, rect.width, ground);
     frame.render_widget(Paragraph::new(Line::from(spans)), rect);
     hits.push((rect, WorkspaceHit::SelectSpace(space.id)));
+}
+
+/// The overlay the row in front wears: a trace of the accent over the
+/// panel a space sits on.
+pub(super) fn front_ground() -> Color {
+    theme::tinted(Token::Accent, Token::SurfaceRaisedSubtle)
 }
 
 /// The ground under a space's rows: the panel itself where a space is

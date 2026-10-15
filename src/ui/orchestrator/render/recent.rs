@@ -2,7 +2,7 @@
 //! each, with what the selected one is about said beneath it.
 
 use super::*;
-use crate::ui::widget::{Align, Button, RowState, Scrollbar, button_row, hint};
+use crate::ui::widget::{Align, Button, Field, RowState, Scrollbar, button_row, hint};
 
 /// What a click on one of recent's lines reaches.
 #[derive(Clone, Copy, PartialEq)]
@@ -40,17 +40,15 @@ pub(super) fn render_recent(
         rows.bottom -= 1;
         rect
     });
-    let lines = lines_of(model, &list, selected, width);
-    if lines.is_empty()
+    if rows.remaining() > 3
         && let Some(rect) = rows.next(1)
     {
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                lead(),
-                Span::styled("nothing kept", theme::fg(Token::TextMuted)),
-            ])),
-            rect,
-        );
+        render_search(frame, model, rect, hits);
+        rows.next(1);
+    }
+    let lines = lines_of(model, &list, selected, width);
+    if lines.is_empty() {
+        render_empty(frame, rows, width, empty_title(model));
     }
     let visible = usize::from(rows.remaining());
     let focus = selected.and_then(|index| {
@@ -91,8 +89,8 @@ pub(super) fn render_recent(
             Target::Row(index) => hits.push((rect, WorkspaceHit::RecentRow(index))),
             Target::Answers(index) => {
                 let room = Rect {
-                    x: rect.x + TRAILING_PAD,
-                    width: rect.width.saturating_sub(2 * TRAILING_PAD),
+                    x: rect.x + TRAILING_PAD + ROW_INDENT,
+                    width: rect.width.saturating_sub(2 * TRAILING_PAD + ROW_INDENT),
                     ..rect
                 };
                 if let Some(word) = list.get(index).and_then(RecentRow::taking_away) {
@@ -121,10 +119,81 @@ pub(super) fn render_recent(
             ],
             &keys_for(row, model.recent.asking, model.recent.on_confirm),
         );
-        let mut spans = vec![lead()];
-        spans.extend(keys.spans);
-        frame.render_widget(Paragraph::new(Line::from(spans)), rect);
+        frame.render_widget(Paragraph::new(keys.centered()), rect);
     }
+}
+
+/// The search row: the field, and beside it the key that lists every
+/// agent or only the named ones, which goes while the field takes text
+/// because a letter typed there is a letter of the search.
+fn render_search(
+    frame: &mut ratatui::Frame<'_>,
+    model: &WorkspaceModel,
+    rect: Rect,
+    hits: &mut Vec<(Rect, WorkspaceHit)>,
+) {
+    let recent = &model.recent;
+    let room = Rect {
+        x: rect.x + TRAILING_PAD,
+        width: rect.width.saturating_sub(2 * TRAILING_PAD),
+        ..rect
+    };
+    let mut field = room;
+    if !recent.filtering {
+        let name = if recent.show_all { "named" } else { "all" };
+        let toggle = hint::named_within(
+            room.width / 2,
+            &[
+                uze_keys::Scope::Global,
+                uze_keys::Scope::Workspace,
+                uze_keys::Scope::Recent,
+            ],
+            &[(Action::ToggleAllWork, name.to_owned())],
+        );
+        let toggle_width = toggle.width() as u16;
+        let at = Rect {
+            x: room.right().saturating_sub(toggle_width),
+            width: toggle_width,
+            ..room
+        };
+        frame.render_widget(Paragraph::new(toggle), at);
+        hits.push((at, WorkspaceHit::RecentShowAll));
+        field.width = field.width.saturating_sub(toggle_width + 1);
+    }
+    let placeholder = if recent.filtering {
+        "name, branch, project, state…"
+    } else {
+        "search"
+    };
+    Field::new(&recent.filter, placeholder)
+        .focused(recent.filtering)
+        .render_search(frame, field);
+    hits.push((field, WorkspaceHit::RecentSearch));
+}
+
+/// What the empty list says: nothing kept at all, nothing the search
+/// matches, or nothing named while unnamed agents are left out.
+fn empty_title(model: &WorkspaceModel) -> &'static str {
+    let every = every_recent_row(model);
+    if every.is_empty() {
+        "nothing kept yet"
+    } else if !model.recent.filter.trim().is_empty() {
+        "nothing matches"
+    } else {
+        "nothing named yet"
+    }
+}
+
+/// What recent is for, said where its rows would be: a title alone,
+/// centred in the room the rows would take.
+fn render_empty(frame: &mut ratatui::Frame<'_>, rows: &mut Rows, width: u16, title: &'static str) {
+    let middle = rows.remaining().saturating_sub(1) / 2;
+    rows.next(middle);
+    let Some(rect) = rows.next(1) else { return };
+    let title = Span::styled(title, theme::fg_bold(Token::TextSecondary));
+    let mut line = Line::from(title).centered();
+    text::clip(&mut line, usize::from(width));
+    frame.render_widget(Paragraph::new(line), rect);
 }
 
 /// The question's two answers, the keyboard on one of them: going ahead
@@ -142,9 +211,10 @@ fn answers(word: &str, on_confirm: bool) -> [(Button, WorkspaceHit); 2] {
     ]
 }
 
-/// What the foot offers for `row`: enter's move and the two letters, each
-/// under the word it means here, or, while it asks, what enter takes and
-/// how to reach the other answer.
+/// What the foot offers for `row`: enter's move and the one that takes
+/// the row away, or, while it asks, what enter takes and how to reach the
+/// other answer. One line, so only those two: escape leaves every surface
+/// alike, and delivering is reached through the action index.
 fn keys_for(row: Option<&RecentRow>, asking: bool, on_confirm: bool) -> Vec<(Action, String)> {
     let mut keys = Vec::new();
     if let Some(word) = row.and_then(RecentRow::taking_away).filter(|_| asking) {
@@ -160,14 +230,45 @@ fn keys_for(row: Option<&RecentRow>, asking: bool, on_confirm: bool) -> Vec<(Act
     keys.extend(
         row.into_iter()
             .flat_map(RecentRow::offers)
+            .filter(|(action, _)| matches!(action, Action::Activate | Action::DiscardTask))
             .map(|(action, word)| (action, word.to_owned())),
     );
-    keys.push((Action::Dismiss, "close".to_owned()));
     keys
 }
 
 fn lead() -> Span<'static> {
     Span::raw(" ".repeat(usize::from(TRAILING_PAD)))
+}
+
+/// How far a row sits in from its group's title: the step is what says
+/// which lines are titles and which are what they hold.
+const ROW_INDENT: u16 = 2;
+
+fn indent() -> Span<'static> {
+    Span::raw(" ".repeat(usize::from(ROW_INDENT)))
+}
+
+/// A row's leading margin: on the selected row, the thin bar the space
+/// tree's row in front wears, so the two lists mark selection alike.
+fn gutter(selected: bool) -> Span<'static> {
+    let mut gutter = space_gutter(selected, true);
+    let gap = TRAILING_PAD.saturating_sub(theme::width(Symbol::BarThin));
+    gutter.content = format!("{}{}", gutter.content, " ".repeat(usize::from(gap))).into();
+    gutter
+}
+
+/// The mark in that step, on the row's first line: bright on the selected
+/// row and quiet on the rest, so the step reads as a list rather than as
+/// room left empty.
+fn bullet(selected: bool) -> Span<'static> {
+    let glyph = theme::glyph(Symbol::MarkDot);
+    let gap = usize::from(ROW_INDENT.saturating_sub(theme::width(Symbol::MarkDot)));
+    let hue = if selected {
+        Token::TextBright
+    } else {
+        Token::TextFaint
+    };
+    Span::styled(format!("{glyph}{}", " ".repeat(gap)), theme::fg(hue))
 }
 
 /// Every line of the list, each with what a click on it reaches.
@@ -228,7 +329,11 @@ fn row_lines(
     } else {
         theme::fg(Token::TextPrimary)
     };
-    let mut first = vec![lead(), Span::styled(row.name.clone(), name_style)];
+    let mut first = vec![
+        gutter(selected),
+        bullet(selected),
+        Span::styled(row.name.clone(), name_style),
+    ];
     row::push_trailing(
         &mut first,
         width,
@@ -242,7 +347,11 @@ fn row_lines(
         } else {
             Token::TextMuted
         };
-        let mut reason = vec![lead(), Span::styled(row.reason.words(), theme::fg(hue))];
+        let mut reason = vec![
+            gutter(selected),
+            indent(),
+            Span::styled(row.reason.words(), theme::fg(hue)),
+        ];
         if selected {
             let project = if gone || space_open_on(model, &row.project) {
                 project_name(&row.project)
@@ -256,28 +365,36 @@ fn row_lines(
     if asking {
         // Folded rather than cut: what goes is the whole point of asking,
         // and a narrow column would otherwise lose the end of it.
-        let room = usize::from(width.saturating_sub(2 * TRAILING_PAD));
+        let room = usize::from(width.saturating_sub(2 * TRAILING_PAD + ROW_INDENT));
         for words in text::fold(row.question(), room) {
             lines.push(vec![
-                lead(),
+                gutter(selected),
+                indent(),
                 Span::styled(words, theme::fg(Token::StateWarning)),
             ]);
         }
     } else if selected {
         lines.push(vec![
-            lead(),
+            gutter(selected),
+            indent(),
             Span::styled(facts_of(row), theme::fg(Token::TextMuted)),
         ]);
     }
     let answers = asking.then_some(lines.len());
     if answers.is_some() {
-        lines.push(vec![lead()]);
+        lines.push(vec![gutter(selected), indent()]);
     }
     lines
         .into_iter()
         .enumerate()
         .map(|(at, mut spans)| {
-            row::fill(&mut spans, width, state);
+            // The selected row wears the overlay the tree's row in front
+            // wears: one meaning, one tone, in either list.
+            if state == RowState::Selected {
+                row::pad_to(&mut spans, width, front_ground());
+            } else {
+                row::fill(&mut spans, width, state);
+            }
             let mut line = Line::from(spans);
             text::clip(&mut line, usize::from(width));
             let target = if answers == Some(at) {

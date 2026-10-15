@@ -782,6 +782,11 @@ pub(super) enum WorkspaceHit {
     /// One of the answers to the question recent's row is asking: `true`
     /// for going ahead.
     RecentAnswer(bool),
+    /// Recent's search row, which a click starts typing into.
+    RecentSearch,
+    /// The key beside the search that lists every agent or only the
+    /// named ones.
+    RecentShowAll,
     /// The sidebar header's name, the way in and out of recent.
     ToggleRecent,
     SelectTab(TabId),
@@ -908,6 +913,20 @@ impl WorkspaceHit {
             WorkspaceHit::Extension(
                 ExtensionHit::Code(_) | ExtensionHit::Spec(_) | ExtensionHit::Architect(_)
             )
+        )
+    }
+
+    /// Whether this is one of recent's own targets, its way in and out
+    /// among them.
+    pub(super) fn is_recents(self) -> bool {
+        matches!(
+            self,
+            WorkspaceHit::RecentRow(_)
+                | WorkspaceHit::RecentScrollGrab
+                | WorkspaceHit::RecentAnswer(_)
+                | WorkspaceHit::RecentSearch
+                | WorkspaceHit::RecentShowAll
+                | WorkspaceHit::ToggleRecent
         )
     }
 }
@@ -2070,7 +2089,7 @@ impl WorkspaceModel {
             && self.agent_picker.is_none()
             && self.support_dropdown.is_none()
             && self.status_catalog.is_none()
-            && !self.recent.open
+            && !self.recent.has_keys()
             && self.context_menu.is_none()
             && self.approval.is_none()
             && self.action_index.is_none()

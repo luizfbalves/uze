@@ -434,7 +434,9 @@ need to).
   holds today, each tied to the specific test that proves it. Treat this as
   the canonical list of "do not break this" behaviors.
 - `openspec/` — active/archived change proposals (spec-driven work log);
-  `openspec validate --all --strict` is part of the full gate set.
+  `openspec validate --all --strict` gates CI (the `OpenSpec` job, CLI
+  pinned there): warnings fail it too, so a requirement body over 500
+  characters or a placeholder Purpose is fixed in the change that wrote it.
 
 ## Product journeys
 

@@ -84,18 +84,10 @@ pub(crate) fn fill(spans: &mut Vec<Span<'_>>, width: u16, state: RowState) {
     pad_to(spans, width, theme::color(ground));
 }
 
-/// Appends `text` pinned to the row's right edge, `TRAILING_PAD` off the
-/// divider — the column the agent rows keep their alias in.
-///
-/// `text` is elided rather than allowed to overflow. It is the row's
-/// caption, and a caption that does not fit used to run past the edge and
-/// be cut there by the frame — which is how a long branch name on the Git
-/// section header became an unreadable fragment with no "…" to say it had
-/// been shortened.
-/// The same, with the text slid sideways by the clock (see [`marquee`])
-/// when it is too long for the room: a caption that cannot be shortened
-/// without losing the end of it — a branch name is read from both ends —
-/// passes through instead of stopping at an "…".
+/// [`push_trailing`], with the text slid sideways by the clock (see
+/// [`marquee`]) when it is too long for the room: a caption that cannot be
+/// shortened without losing the end of it — a branch name is read from
+/// both ends — passes through instead of stopping at an "…".
 ///
 /// Only while something is asking to read it, which is the caller's
 /// business: this draws the frame it is given the ticks for and says
@@ -153,35 +145,68 @@ pub(crate) fn marquee(
         .iter()
         .flat_map(|(text, style)| text.chars().map(|glyph| (glyph, *style)))
         .collect();
-    if text.len() <= room {
+    let length: usize = text.iter().map(|(glyph, _)| text::cell_width(*glyph)).sum();
+    if length <= room {
         return None;
     }
-    let cycle = text.len() + GAP;
+    let cycle = length + GAP;
     let offset = (ticks % (REST + cycle * PACE)).saturating_sub(REST) / PACE;
     let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut push = |glyph: char, style: Style| match spans.last_mut() {
+        Some(last) if last.style == style => last.content.to_mut().push(glyph),
+        _ => spans.push(Span::styled(glyph.to_string(), style)),
+    };
+    // Measured in cells, as `room` is: a wide glyph cut by either edge of
+    // the window shows as the blank half it leaves rather than overflowing.
+    let (mut column, mut used) = (0, 0);
     for (glyph, style) in text
         .iter()
         .copied()
         .chain(std::iter::repeat_n((' ', Style::default()), GAP))
         .chain(text.iter().copied())
-        .skip(offset)
-        .take(room)
     {
-        match spans.last_mut() {
-            Some(last) if last.style == style => last.content.to_mut().push(glyph),
-            _ => spans.push(Span::styled(glyph.to_string(), style)),
+        let width = text::cell_width(glyph);
+        let start = column;
+        column += width;
+        if column <= offset {
+            continue;
+        }
+        let shown = if start < offset {
+            column - offset
+        } else {
+            width
+        };
+        if shown < width || used + width > room {
+            for _ in 0..shown.min(room - used) {
+                push(' ', style);
+            }
+            used += shown.min(room - used);
+        } else {
+            push(glyph, style);
+            used += width;
+        }
+        if used == room {
+            break;
         }
     }
     Some(spans)
 }
 
+/// Appends `text` pinned to the row's right edge, `TRAILING_PAD` off the
+/// divider — the column the agent rows keep their alias in.
+///
+/// `text` is elided rather than allowed to overflow. It is the row's
+/// caption, and a caption that does not fit used to run past the edge and
+/// be cut there by the frame — which is how a long branch name on the Git
+/// section header became an unreadable fragment with no "…" to say it had
+/// been shortened.
 pub(crate) fn push_trailing<'a>(spans: &mut Vec<Span<'a>>, width: u16, text: String, hue: Color) {
     let leading: u16 = spans.iter().map(|span| span.width() as u16).sum();
     // One column of gap between the leading spans and the caption, so the
     // two never read as one word.
     let room = width.saturating_sub(leading + TRAILING_PAD + 1).max(1);
     let text = text::elide(&text, room as usize);
-    let used = leading + text.chars().count() as u16 + TRAILING_PAD;
+    let used = leading + text::columns(&text) as u16 + TRAILING_PAD;
     let gap = width.saturating_sub(used).max(1);
     spans.push(Span::raw(" ".repeat(gap as usize)));
     spans.push(Span::styled(text, Style::default().fg(hue)));
@@ -192,7 +217,7 @@ pub(crate) fn push_trailing<'a>(spans: &mut Vec<Span<'a>>, width: u16, text: Str
 /// dismisses it pinned to the right.
 pub(crate) fn title_row(name: &str, dismiss: &str, width: usize) -> ratatui::text::Line<'static> {
     let gap = width
-        .saturating_sub(name.chars().count() + dismiss.chars().count())
+        .saturating_sub(text::columns(name) + text::columns(dismiss))
         .max(1);
     Line::from(vec![
         Span::styled(

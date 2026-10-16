@@ -47,7 +47,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use crate::{Result, UzeError, home::UzeHome};
@@ -68,7 +68,24 @@ pub fn create_symlink(target: &Path, link: &Path) -> Result<()> {
 }
 
 pub fn write_atomic(path: &Path, payload: &[u8]) -> Result<()> {
-    replace_atomically(path, payload, None)
+    replace_atomically(path, payload, None, Durability::Synced)
+}
+
+/// [`write_atomic`] for what UZE generates or remembers (`runtime/`,
+/// `cache/`): a reader still sees the old file or the new one, never half
+/// of either, but nothing waits for the disk. Losing such a file to a
+/// crash costs nothing — it is produced or observed again — while the two
+/// syncs are most of what the write costs on a slow filesystem.
+pub fn write_atomic_unsynced(path: &Path, payload: &[u8]) -> Result<()> {
+    replace_atomically(path, payload, None, Durability::Unsynced)
+}
+
+/// Whether a replacement waits for the disk before and after it is
+/// published.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Durability {
+    Synced,
+    Unsynced,
 }
 
 /// Replaces a file a person owns — an rc file, `AGENTS.md`, `agents.yaml` —
@@ -84,7 +101,7 @@ pub fn write_atomic_preserving(path: &Path, payload: &[u8]) -> Result<()> {
     let permissions = fs::metadata(&destination)
         .ok()
         .map(|metadata| metadata.permissions());
-    replace_atomically(&destination, payload, permissions)
+    replace_atomically(&destination, payload, permissions, Durability::Synced)
 }
 
 /// [`write_atomic_preserving`] for a file a project keeps, which may be a
@@ -102,7 +119,7 @@ pub fn write_atomic_within(root: &Path, path: &Path, payload: &[u8]) -> Result<(
     let permissions = fs::metadata(&destination)
         .ok()
         .map(|metadata| metadata.permissions());
-    replace_atomically(&destination, payload, permissions)
+    replace_atomically(&destination, payload, permissions, Durability::Synced)
 }
 
 /// Where a write to the project file `path` lands, refused when that is
@@ -250,6 +267,7 @@ fn replace_atomically(
     path: &Path,
     payload: &[u8],
     permissions: Option<fs::Permissions>,
+    durability: Durability,
 ) -> Result<()> {
     let _span =
         tracing::debug_span!("persistence.write", path = %path.display(), bytes = payload.len())
@@ -272,9 +290,13 @@ fn replace_atomically(
         }
         file.write_all(payload)
             .map_err(UzeError::write(&temporary))?;
-        file.sync_all().map_err(UzeError::write(&temporary))?;
+        if durability == Durability::Synced {
+            file.sync_all().map_err(UzeError::write(&temporary))?;
+        }
         uze_platform::fs::rename(&temporary, path).map_err(UzeError::write(path))?;
-        uze_platform::fs::sync_directory(parent);
+        if durability == Durability::Synced {
+            uze_platform::fs::sync_directory(parent);
+        }
         Ok(())
     })();
     if result.is_err() {
@@ -302,9 +324,7 @@ pub fn temporary_path(path: &Path, parent: &Path) -> PathBuf {
 
     // A clock set before the epoch only costs the nonce: the pid and the
     // sequence already make the name unique.
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_nanos());
+    let nonce = uze_platform::clock::since_epoch().as_nanos();
     parent.join(format!(
         ".{}.{}.{}.{}.tmp",
         path.file_name()
@@ -401,6 +421,51 @@ fn try_lock_exclusive_briefly(file: &File) -> std::io::Result<()> {
             }
             outcome => return outcome,
         }
+    }
+}
+
+/// An exclusive lock on a file `UzeHome` names, held for one
+/// read-modify-write of something two processes rewrite. Releasing it is
+/// dropping this; a process that dies releases it with its descriptors.
+pub struct FileLock {
+    /// Closing this is what releases the lock.
+    _file: File,
+}
+
+impl FileLock {
+    /// Waits up to `patience` for the lock at `path`, asking again every
+    /// `retry`. Waiting longer is [`UzeError::MutationInProgress`], never a
+    /// write without it.
+    pub fn acquire(path: &Path, patience: Duration, retry: Duration) -> Result<Self> {
+        let parent = path.parent().expect("UZE state paths have a parent");
+        fs::create_dir_all(parent).map_err(UzeError::write(parent))?;
+        // Readable or writable, not append-only: Windows refuses to lock a
+        // handle that may only append.
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path)
+            .map_err(UzeError::write(path))?;
+        let started = Instant::now();
+        while let Err(error) = try_lock_exclusive(&file) {
+            if error.kind() != std::io::ErrorKind::WouldBlock {
+                return Err(UzeError::Write {
+                    path: path.to_path_buf(),
+                    source: error,
+                });
+            }
+            if started.elapsed() >= patience {
+                // `flock` names no holder, so the pid is genuinely unknown
+                // here rather than merely unread.
+                return Err(UzeError::MutationInProgress {
+                    path: path.to_path_buf(),
+                    pid: None,
+                });
+            }
+            std::thread::sleep(retry);
+        }
+        Ok(Self { _file: file })
     }
 }
 

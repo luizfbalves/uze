@@ -309,6 +309,19 @@ pub fn may_be_set_aside(reason: &DocumentError) -> bool {
     }
 }
 
+/// The mark a set-aside record's name carries. Chosen so that what is set
+/// aside stops being a `.json`: it must not read as a second record to
+/// anything listing the directory.
+pub const SET_ASIDE_MARK: &str = ".unreadable-";
+
+/// When the record named `file_name` was set aside, in seconds since the
+/// epoch, or `None` when the name is not one [`set_aside`] gives.
+pub fn set_aside_stamp(file_name: &str) -> Option<u64> {
+    let (_, stamp) = file_name.rsplit_once(SET_ASIDE_MARK)?;
+    let seconds = stamp.split_once('-').map_or(stamp, |(seconds, _)| seconds);
+    Some(seconds.parse().unwrap_or_default())
+}
+
 /// Moves the record aside so it can be recorded again, and says what was
 /// moved.
 ///
@@ -320,7 +333,7 @@ pub fn set_aside(path: &Path, kind: &str, reason: &DocumentError) -> Result<SetA
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or(kind);
-    let moved = unused_name(path, &format!("{name}.unreadable-{}", now_unix()));
+    let moved = unused_name(path, &format!("{name}{SET_ASIDE_MARK}{}", now_unix()));
     fs::rename(path, &moved).map_err(|source| DocumentError::Write {
         path: moved.clone(),
         source,
@@ -578,6 +591,22 @@ mod tests {
         assert_ne!(first.path, second.path);
         assert_eq!(fs::read_to_string(&first.path).unwrap(), "first");
         assert_eq!(fs::read_to_string(&second.path).unwrap(), "second");
+    }
+
+    /// The number that keeps a second record from replacing the first is
+    /// not part of when it was set aside: read as one, the record sorted as
+    /// set aside at the epoch and fell out of the newest reported.
+    #[test]
+    fn a_numbered_set_aside_name_keeps_its_stamp() {
+        assert_eq!(
+            set_aside_stamp("packages.json.unreadable-1700000000-1"),
+            Some(1_700_000_000)
+        );
+        assert_eq!(
+            set_aside_stamp("packages.json.unreadable-1700000000"),
+            Some(1_700_000_000)
+        );
+        assert_eq!(set_aside_stamp("packages.json"), None);
     }
 
     struct Stuck;

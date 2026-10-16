@@ -100,16 +100,7 @@ impl UzeApplication {
         integration: &dyn IntegrationPort,
     ) -> Result<()> {
         let mut first_error: Option<uze_core::UzeError> = None;
-        for package_id in self.store.package_ids()? {
-            let package = match self.store.package(&package_id) {
-                Ok(pkg) => pkg,
-                Err(error) => {
-                    if first_error.is_none() {
-                        first_error = Some(error);
-                    }
-                    continue;
-                }
-            };
+        for package in self.store.packages()? {
             if let Err(error) = self.attach_package_to(&package, integration)
                 && first_error.is_none()
             {
@@ -404,10 +395,13 @@ impl UzeApplication {
     ) -> Result<Option<BlockedDelivery>> {
         let named_by_candidates = resource.capability.kind.is_invoked_by_label()
             || resource.capability.kind == CapabilityKind::Mcp;
-        if !named_by_candidates || integration.exposure_name_candidates(resource).is_empty() {
+        if !named_by_candidates {
             return Ok(None);
         }
         let current = integration.exposure_name_candidates(resource);
+        if current.is_empty() {
+            return Ok(None);
+        }
         let planned_artifact = planned_artifact(integration, resource);
         let planned = planned_artifact.as_ref().map(std::mem::discriminant);
         let identity = resource.identity();
@@ -503,9 +497,7 @@ impl UzeApplication {
             return Ok(resource.clone());
         }
         let mut resolved = resource.clone();
-        let Ok(all_receipts) = state::receipts(&self.home, None) else {
-            return Ok(resolved);
-        };
+        let all_receipts = state::receipts(&self.home, None)?;
         let resource_id = resource.identity();
         // Existing receipt wins: a resource already attached keeps the
         // physical entry it was given, so re-running attach never renames

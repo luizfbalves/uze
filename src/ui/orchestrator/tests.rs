@@ -6,7 +6,7 @@
 
 use super::*;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "bench"))]
 mod perf;
 mod recent;
 
@@ -5392,6 +5392,15 @@ mod workspace_tests {
             18,
             "the frame keeps its height: {rows:?}"
         );
+    }
+
+    /// A frame with no columns at all — a terminal being resized through
+    /// nothing — lays the popup out without arithmetic going below zero.
+    #[test]
+    fn a_frame_with_no_width_lays_the_commit_popup_out() {
+        let popup = commit_popup(Rect::new(0, 0, 0, 1));
+        let layout = render::commit_detail_layout(Rect::new(0, 0, 0, 10), &popup);
+        assert_eq!(layout.rect.x, 0);
     }
 
     /// A frame with no room beside the sidebar puts the popup over the
@@ -11260,15 +11269,9 @@ mod workspace_tests {
     /// rather than landing in the one in front of the operator.
     #[test]
     fn resuming_a_preserved_task_that_kept_its_checkout_opens_a_stamped_tab() {
-        resumes_the_task_in_its_projects_space("resume");
-    }
-
-    fn resumes_the_task_in_its_projects_space(name: &str) {
-        let repository = uze_testkit::git::Repository::new(&format!("orchestrator-{name}-kept"));
+        let repository = uze_testkit::git::Repository::new("orchestrator-resume-kept");
         let root = repository.root().to_path_buf();
-        let home = UzeHome::at(uze_testkit::temp::scratch(&format!(
-            "orchestrator-{name}-kept-home"
-        )));
+        let home = UzeHome::at(uze_testkit::temp::scratch("orchestrator-resume-kept-home"));
         set_up_every_harness(&home);
         let app = uze_application::UzeApplication::new(home.clone(), Vec::new());
         let placement = app

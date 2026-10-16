@@ -84,8 +84,10 @@ impl Exclusions {
                     }
                     _ => return None,
                 };
+                let mut spellings = Vec::new();
+                expand_braces(normalised(pattern), &mut spellings).ok()?;
                 Some(Rule {
-                    alternatives: expand_braces(normalised(pattern))
+                    alternatives: spellings
                         .iter()
                         .map(|spelling| spelling.split('/').map(Segment::parse).collect())
                         .collect(),
@@ -199,11 +201,21 @@ fn strict_json(text: &str) -> String {
     out
 }
 
-/// Every spelling `{a,b}` stands for, nested braces included. An
-/// unclosed brace is literal, as it is to VS Code.
-fn expand_braces(pattern: &str) -> Vec<String> {
+/// The most spellings one pattern's braces may stand for. The settings
+/// come from the checkout, so a freshly cloned repository could otherwise
+/// ask for `2^n` of them with `n` pairs of braces; a pattern past this is
+/// ignored whole, since hiding some of what it names would be a guess.
+const MAX_SPELLINGS: usize = 256;
+
+/// A pattern whose braces stand for more than [`MAX_SPELLINGS`].
+#[derive(Debug)]
+struct TooManySpellings;
+
+/// Every spelling `{a,b}` stands for, nested braces included, appended to
+/// `spellings`. An unclosed brace is literal, as it is to VS Code.
+fn expand_braces(pattern: &str, spellings: &mut Vec<String>) -> Result<(), TooManySpellings> {
     let Some(open) = pattern.find('{') else {
-        return vec![pattern.to_owned()];
+        return push_spelling(pattern, spellings);
     };
     let mut depth = 0;
     let mut commas = Vec::new();
@@ -223,46 +235,130 @@ fn expand_braces(pattern: &str) -> Vec<String> {
         }
     }
     let Some(close) = close else {
-        return vec![pattern.to_owned()];
+        return push_spelling(pattern, spellings);
     };
     let (head, tail) = (&pattern[..open], &pattern[close + 1..]);
     let bounds: Vec<usize> = std::iter::once(open)
         .chain(commas)
         .chain(std::iter::once(close))
         .collect();
-    bounds
-        .windows(2)
-        .flat_map(|pair| expand_braces(&format!("{head}{}{tail}", &pattern[pair[0] + 1..pair[1]])))
-        .collect()
+    bounds.windows(2).try_for_each(|pair| {
+        expand_braces(
+            &format!("{head}{}{tail}", &pattern[pair[0] + 1..pair[1]]),
+            spellings,
+        )
+    })
 }
 
-fn matches_path(pattern: &[Segment], path: &[Vec<char>]) -> bool {
-    match pattern.split_first() {
-        None => path.is_empty(),
-        Some((Segment::AnyDepth, rest)) => {
-            (0..=path.len()).any(|skipped| matches_path(rest, &path[skipped..]))
-        }
-        Some((Segment::Name(segment), rest)) => path.split_first().is_some_and(|(name, deeper)| {
-            matches_name(segment, name) && matches_path(rest, deeper)
-        }),
+fn push_spelling(spelling: &str, spellings: &mut Vec<String>) -> Result<(), TooManySpellings> {
+    if spellings.len() == MAX_SPELLINGS {
+        return Err(TooManySpellings);
     }
+    spellings.push(spelling.to_owned());
+    Ok(())
+}
+
+/// A path against a pattern's segments. `**` is matched the way `*` is
+/// in [`matches_name`], one name standing for one character, so a pattern
+/// with many of them costs no more than its length times the path's.
+fn matches_path(pattern: &[Segment], path: &[Vec<char>]) -> bool {
+    matches_sequence(
+        pattern,
+        path,
+        |segment| matches!(segment, Segment::AnyDepth),
+        |segment, name| match segment {
+            Segment::AnyDepth => false,
+            Segment::Name(segment) => matches_name(segment, name),
+        },
+    )
 }
 
 /// One name against one segment of a pattern.
 fn matches_name(pattern: &[char], name: &[char]) -> bool {
-    match pattern.split_first() {
-        None => name.is_empty(),
-        Some(('*', rest)) => (0..=name.len()).any(|taken| matches_name(rest, &name[taken..])),
-        Some(('?', rest)) => !name.is_empty() && matches_name(rest, &name[1..]),
-        Some(('[', rest)) => match (class_end(rest), name.split_first()) {
-            (Some(end), Some((&c, deeper))) => {
-                in_class(&rest[..end], c) && matches_name(&rest[end + 1..], deeper)
-            }
-            (Some(_), None) => false,
-            (None, _) => name.first() == Some(&'[') && matches_name(rest, &name[1..]),
-        },
-        Some((&literal, rest)) => name.first() == Some(&literal) && matches_name(rest, &name[1..]),
+    let tokens = name_tokens(pattern);
+    matches_sequence(
+        &tokens,
+        name,
+        |token| matches!(token, NameToken::AnyRun),
+        |token, &c| token.matches(c),
+    )
+}
+
+/// One position of a segment: what a single character of a name is held
+/// against, or the `*` that stands for any run of them.
+enum NameToken<'a> {
+    AnyRun,
+    AnyOne,
+    Class(&'a [char]),
+    Literal(char),
+}
+
+impl NameToken<'_> {
+    fn matches(&self, c: char) -> bool {
+        match self {
+            Self::AnyRun => false,
+            Self::AnyOne => true,
+            Self::Class(class) => in_class(class, c),
+            Self::Literal(literal) => *literal == c,
+        }
     }
+}
+
+/// A segment read once into its positions. A `[` with no closing `]` is a
+/// literal bracket.
+fn name_tokens(pattern: &[char]) -> Vec<NameToken<'_>> {
+    let mut tokens = Vec::with_capacity(pattern.len());
+    let mut at = 0;
+    while at < pattern.len() {
+        let rest = &pattern[at + 1..];
+        match pattern[at] {
+            '*' => tokens.push(NameToken::AnyRun),
+            '?' => tokens.push(NameToken::AnyOne),
+            '[' => match class_end(rest) {
+                Some(end) => {
+                    tokens.push(NameToken::Class(&rest[..end]));
+                    at += end + 1;
+                }
+                None => tokens.push(NameToken::Literal('[')),
+            },
+            literal => tokens.push(NameToken::Literal(literal)),
+        }
+        at += 1;
+    }
+    tokens
+}
+
+/// The classic wildcard match: walk both sides together and, on a
+/// mismatch, give the most recent wildcard one more item instead of
+/// retrying every earlier choice. Every other token takes exactly one
+/// item, which is what makes remembering only the last wildcard enough.
+fn matches_sequence<Token, Item>(
+    pattern: &[Token],
+    items: &[Item],
+    is_wildcard: impl Fn(&Token) -> bool,
+    takes_one: impl Fn(&Token, &Item) -> bool,
+) -> bool {
+    let (mut at, mut item) = (0, 0);
+    let mut resume: Option<(usize, usize)> = None;
+    while item < items.len() {
+        if pattern.get(at).is_some_and(&is_wildcard) {
+            at += 1;
+            resume = Some((at, item));
+        } else if pattern
+            .get(at)
+            .is_some_and(|token| takes_one(token, &items[item]))
+        {
+            at += 1;
+            item += 1;
+        } else if let Some((after_wildcard, taken)) = resume {
+            at = after_wildcard;
+            item = taken + 1;
+            resume = Some((after_wildcard, item));
+        } else {
+            return false;
+        }
+    }
+    pattern[at..].iter().all(is_wildcard)
 }
 
 /// Where the class opened just before `rest` closes. A `]` right after
@@ -373,6 +469,40 @@ mod tests {
         let settings = r#"{ "files.exclude": { "**/*.js": { "when": "$(basename).ts" } } }"#;
         let listing = [("app.js", false), ("app.ts", false), ("tool.js", false)];
         assert_eq!(shown(settings, "src", &listing), ["app.ts", "tool.js"]);
+    }
+
+    /// Thirty pairs of braces stand for 2^30 spellings; the pattern is
+    /// ignored rather than expanded, and a sibling pattern still applies.
+    #[test]
+    fn a_pattern_whose_braces_stand_for_too_many_spellings_is_ignored() {
+        let explosive = "{a,b}".repeat(30);
+        let within = "{a,b}".repeat(8);
+        let settings = format!(
+            r#"{{ "files.exclude": {{ "{explosive}": true, "{within}": true, "dist": true }} }}"#
+        );
+        let named_by_the_explosive = "a".repeat(30);
+        let listing = [
+            (named_by_the_explosive.as_str(), false),
+            ("abababab", false),
+            ("dist", true),
+        ];
+        assert_eq!(shown(&settings, "", &listing), [named_by_the_explosive]);
+    }
+
+    /// Patterns that a backtracking matcher takes exponential time over:
+    /// many `*` in one name, and many `**` across a deep path, neither of
+    /// which matches.
+    #[test]
+    fn a_pattern_of_many_wildcards_is_matched_in_linear_passes() {
+        let stars = format!("{}b", "*a".repeat(20));
+        let depths = format!("{}missing", "**/a/".repeat(20));
+        let settings = format!(r#"{{ "files.exclude": {{ "{stars}": true, "{depths}": true }} }}"#);
+        let long_name = "a".repeat(200);
+        let deep = vec!["a"; 60].join("/");
+        assert_eq!(
+            shown(&settings, &deep, &[(long_name.as_str(), false)]),
+            [long_name.as_str()]
+        );
     }
 
     /// What VS Code itself writes: comments, a trailing comma, and other

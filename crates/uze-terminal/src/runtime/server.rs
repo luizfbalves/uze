@@ -669,14 +669,7 @@ impl Server {
         let _settled = self.registering.read().expect("registering poisoned");
         // Asked after the map's lock is released: each answer reads the
         // process table, and the input and damage paths wait on that lock.
-        let runtimes: Vec<Arc<PaneRuntime>> = self
-            .panes
-            .lock()
-            .expect("panes poisoned")
-            .values()
-            .cloned()
-            .collect();
-        if runtimes.iter().any(|runtime| runtime.holds(peer)) {
+        if self.runtimes().iter().any(|runtime| runtime.holds(peer)) {
             Origin::Pane
         } else {
             Origin::Outside
@@ -844,7 +837,9 @@ impl Server {
             _ => false,
         };
         if changed {
-            for pane in self.panes.lock().expect("panes poisoned").values() {
+            // Told outside the map's lock: the announcement is a PTY write,
+            // which blocks on a program that is not reading.
+            for pane in self.runtimes() {
                 pane.notify_scheme(palette.scheme);
             }
         }
@@ -1000,6 +995,17 @@ impl Server {
             .cloned()
     }
 
+    /// Every pane's runtime, with the map's lock already released: see
+    /// [`Server::runtime`].
+    fn runtimes(&self) -> Vec<Arc<PaneRuntime>> {
+        self.panes
+            .lock()
+            .expect("panes poisoned")
+            .values()
+            .cloned()
+            .collect()
+    }
+
     pub(super) fn write_input(&self, pane: PaneId, bytes: &[u8]) {
         if let Some(runtime) = self.runtime(pane) {
             runtime.write(bytes);
@@ -1100,13 +1106,7 @@ impl Server {
         // The runtimes, not their grids: a repaint is built and handed on
         // one pane at a time, so the largest thing alive at once stays one
         // pane's worth rather than the whole workspace's.
-        let panes: Vec<Arc<PaneRuntime>> = self
-            .panes
-            .lock()
-            .expect("panes poisoned")
-            .values()
-            .cloned()
-            .collect();
+        let panes = self.runtimes();
         if !events.offer(&ClientEvent::Snapshot {
             session: view_for(&session, &self.selection_of(client)),
         }) {
@@ -1142,11 +1142,11 @@ impl Server {
             return;
         }
         let session = self.session.lock().expect("session poisoned").clone();
+        // Encoded outside the map's lock: a whole pane can be a large
+        // frame, and input and damage wait on that lock.
         let repaints: Vec<Frame> = self
-            .panes
-            .lock()
-            .expect("panes poisoned")
-            .values()
+            .runtimes()
+            .iter()
             .map(|pane| Frame::of(&ClientEvent::Damage(whole_pane(pane.snapshot()))))
             .collect();
         self.clients

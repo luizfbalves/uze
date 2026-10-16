@@ -33,7 +33,8 @@ mod pool;
 mod reconcile;
 
 pub use accounting::*;
-pub use anchor::{admin_dir, anchored, guard};
+pub(crate) use anchor::anchor_of;
+pub use anchor::{anchored, guard};
 pub use git_facts::*;
 pub use integration::*;
 pub use lifecycle::*;

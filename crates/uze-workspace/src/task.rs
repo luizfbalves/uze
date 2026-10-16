@@ -28,19 +28,17 @@
 use std::{
     cell::RefCell,
     collections::BTreeSet,
-    fmt, fs,
-    fs::{File, OpenOptions},
+    fmt,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
-    thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use uze_core::path::Canonical as _;
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Result, UzeError, checkout::CheckoutId, digest, harness_runtime::project_id_for, home::UzeHome,
+    Result, checkout::CheckoutId, digest, harness_runtime::project_id_for, home::UzeHome,
     persistence::write_atomic, worktree::BRANCH_PREFIX,
 };
 
@@ -96,10 +94,7 @@ impl fmt::Display for AgentId {
 /// among the identifiers one machine generates, and readable in a path.
 pub(crate) fn generated_identifier(kind: &[u8]) -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or_default();
+    let nanos = uze_platform::clock::since_epoch().as_nanos();
     let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut material = Vec::with_capacity(48);
     material.extend_from_slice(kind);
@@ -293,7 +288,7 @@ impl Agent {
     /// store is keyed by: its own slot, or the project's root. `None` for
     /// an isolated agent whose checkout is gone — nowhere is its own any
     /// more.
-    pub fn own_directory(&self, project_root: &Path) -> Option<PathBuf> {
+    pub(crate) fn own_directory(&self, project_root: &Path) -> Option<PathBuf> {
         match &self.isolation {
             Some(isolation) => isolation
                 .checkout
@@ -394,7 +389,7 @@ impl Agent {
     /// on a machine came back to a fresh conversation at every restart
     /// after the upgrade that introduced the key, and nothing recorded
     /// why.
-    pub fn admits_launch(&self, secret: &str) -> bool {
+    pub(crate) fn admits_launch(&self, secret: &str) -> bool {
         self.launch_key.as_deref().is_none_or(|recorded| {
             uze_platform::secret::matches(
                 uze_core::digest::secret_sha256(secret).as_bytes(),
@@ -449,7 +444,7 @@ impl Isolation {
 
     /// Drops the request unless it was found for `branch` — the name the
     /// work is published under now, or `None` while it is not published.
-    pub fn forget_request_unless_for(&mut self, branch: Option<&str>) {
+    pub(crate) fn forget_request_unless_for(&mut self, branch: Option<&str>) {
         if self.published_request.is_some() && self.request_branch.as_deref() != branch {
             self.forget_request();
         }
@@ -458,16 +453,13 @@ impl Isolation {
 
 /// Seconds since the epoch — how every time this record keeps is written.
 pub fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or_default()
+    uze_platform::clock::since_epoch().as_secs()
 }
 
 /// The first non-empty line of `prompt`, lower-cased, non-alphanumerics
 /// collapsed to single hyphens, cut at a word boundary; the identifier when
 /// nothing usable remains.
-pub fn label_from_prompt(prompt: &str, fallback: &AgentId) -> String {
+pub(crate) fn label_from_prompt(prompt: &str, fallback: &AgentId) -> String {
     let Some(line) = prompt.lines().map(str::trim).find(|line| !line.is_empty()) else {
         return fallback.as_str().to_owned();
     };
@@ -811,7 +803,7 @@ thread_local! {
 /// dropping this.
 struct MutationGuard {
     /// `None` when this thread already held the lock.
-    owned: Option<(PathBuf, File)>,
+    owned: Option<(PathBuf, crate::persistence::FileLock)>,
 }
 
 impl MutationGuard {
@@ -825,31 +817,7 @@ impl MutationGuard {
             );
             return Ok(Self { owned: None });
         }
-        let parent = path.parent().expect("UZE state paths have a parent");
-        fs::create_dir_all(parent).map_err(UzeError::write(parent))?;
-        // Readable or writable, not append-only: Windows refuses to lock a
-        // handle that may only append.
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&path)
-            .map_err(UzeError::write(&path))?;
-        let started = Instant::now();
-        while let Err(error) = crate::persistence::try_lock_exclusive(&file) {
-            if error.kind() != std::io::ErrorKind::WouldBlock {
-                return Err(UzeError::Write {
-                    path,
-                    source: error,
-                });
-            }
-            if started.elapsed() >= MUTATION_TIMEOUT {
-                // `flock` names no holder, so the pid is genuinely unknown
-                // here rather than merely unread.
-                return Err(UzeError::MutationInProgress { path, pid: None });
-            }
-            thread::sleep(MUTATION_RETRY);
-        }
+        let file = crate::persistence::FileLock::acquire(&path, MUTATION_TIMEOUT, MUTATION_RETRY)?;
         HELD.with(|held| held.borrow_mut().push(path.clone()));
         Ok(Self {
             owned: Some((path, file)),
@@ -861,7 +829,7 @@ impl Drop for MutationGuard {
     fn drop(&mut self) {
         if let Some((path, _file)) = self.owned.take() {
             HELD.with(|held| held.borrow_mut().retain(|held| held != &path));
-            // Closing the file releases the `flock`.
+            // Dropping the lock releases the `flock`.
         }
     }
 }
@@ -869,8 +837,10 @@ impl Drop for MutationGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::UzeError;
     use std::{
         collections::HashSet,
+        fs,
         process::{Command, Stdio},
         time::{Duration, Instant},
     };

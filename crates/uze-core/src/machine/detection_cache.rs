@@ -29,7 +29,7 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -110,10 +110,7 @@ fn mtime_unix_nanos(path: &Path) -> Option<u128> {
 }
 
 fn now_unix_nanos() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock after epoch")
-        .as_nanos()
+    uze_platform::clock::since_epoch().as_nanos()
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -144,7 +141,7 @@ impl OnDiskCache {
     /// layered on top of a correct uncached path, not a new dependency.
     fn save(&self, path: &Path) {
         if let Ok(payload) = serde_json::to_vec_pretty(self) {
-            let _ = crate::persistence::write_atomic(path, &payload);
+            let _ = crate::persistence::write_atomic_unsynced(path, &payload);
         }
     }
 }

@@ -214,7 +214,7 @@ pub(crate) fn opencode_bridge(
 // Handler contract: the hook context arrives as HOOK_* environment and the
 // decision leaves as an exit code — 0 allows, {deny_exit_code} denies with
 // the reason on stderr, anything else is a failure that follows the group's
-// effect (fail-closed for deny/ask, fail-open for observe/allow). Each
+// effect (fail-closed for deny/ask/transform, fail-open for observe/allow). Each
 // handler is bounded by the deadline its author declared, and no HOOK_*
 // value is longer than {value_limit} bytes: past that the group's effect
 // decides, as on every other harness.
@@ -236,7 +236,7 @@ const ALIASES = {{
 {aliases}
 }};
 
-const closed = (effect) => effect === "deny" || effect === "ask";
+const closed = (effect) => effect === "deny" || effect === "ask" || effect === "transform";
 
 // The hook context, or null when a value in it is longer than one
 // environment string may be: the contract's bound, the same on every
@@ -508,7 +508,12 @@ export default {{
           call.refused = `${{asked.reason}} (OpenCode offers no permission prompt for \`${{call.tool}}\`, so the call is refused rather than run unasked)`;
         }}
       }}
-      if (call.refused) refuse(event, call.refused);
+      // A refused call never reaches `execute.after`; only a tool that asks
+      // still needs it, for its permission check to deny.
+      if (call.refused) {{
+        refuse(event, call.refused);
+        if (!PROMPTING.includes(call.tool)) CALLS.delete(event.id);
+      }}
     }});
     // Where a tool asks for permission, this is where an `ask` group asks,
     // and a call `execute.before` refused stays refused should it run all
@@ -519,6 +524,7 @@ export default {{
       if (!call || call.decided) return;
       call.decided = true;
       if (call.refused) {{
+        CALLS.delete(event.source.id);
         event.effect = "deny";
         event.message = call.refused;
         return;

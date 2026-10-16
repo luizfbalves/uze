@@ -22,7 +22,7 @@ impl Attach<'_> {
             scopes.push(Scope::ReleaseNotes);
             return scopes;
         }
-        if self.model.approval.is_some() {
+        if self.model.approval.is_some() || self.model.interrupt.is_some() {
             scopes.push(Scope::Confirm);
             return scopes;
         }
@@ -131,7 +131,7 @@ impl Attach<'_> {
     /// pane's; with a picker or a menu open it dismisses, which is that
     /// surface's own "anything else means no".
     pub(super) fn unclaimed(&mut self, key: KeyEvent, chord: Chord) {
-        if self.model.approval.is_some() {
+        if self.model.approval.is_some() || self.model.interrupt.is_some() {
             // Nothing the question did not ask for reaches anything: not
             // the pane behind it, and not an answer.
         } else if self.model.action_index.is_some() {
@@ -261,6 +261,10 @@ impl Attach<'_> {
             self.approval_action(action);
             return Flow::Continue;
         }
+        if self.model.interrupt.is_some() {
+            self.interrupt_action(action);
+            return Flow::Continue;
+        }
         if self.model.support_dropdown.is_some() {
             self.drawer_action(action);
             return Flow::Continue;
@@ -321,6 +325,7 @@ impl Attach<'_> {
                 let anchor = self.new_agent_anchor();
                 self.offer_agents(anchor, None);
             }
+            Action::OpenMenu => self.open_tab_menu_from_the_keyboard(),
             Action::NewSpace => self.open_root_picker(),
             Action::RenameSelection => {
                 if let Some(tab) = self.model.selected_tab() {

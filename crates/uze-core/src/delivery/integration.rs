@@ -12,7 +12,7 @@ use crate::{
     project_context::AgentsDirectoryResource,
     provisioning::ProvisionStatus,
     router::HarnessCapabilities,
-    session::SessionId,
+    session::{ConversationDigest, SessionId},
     state,
     store::StoredPackage,
 };
@@ -353,6 +353,30 @@ pub trait IntegrationPort: Send + Sync {
     /// by guessing.
     fn session_exists(&self, _session: &SessionId, _cwd: &Path) -> bool {
         true
+    }
+
+    /// Arguments that open a launch with `turn` as the operator's first
+    /// message, appended after every other argument the launch carries —
+    /// a positional prompt has to come last, and behind a resume spelled as
+    /// a subcommand. Asked only when an agent continues on this harness
+    /// after another one. The default is none: the agent starts without the
+    /// turn, and its briefing is written all the same.
+    fn first_turn_args(&self, _turn: &str) -> Vec<OsString> {
+        Vec::new()
+    }
+
+    /// What `session`'s transcript says the conversation was about, read
+    /// from this harness's own records, keeping only what was said at or
+    /// after `since_unix` when it is given. `None` — no transcript, a shape
+    /// this build cannot read — is always a valid answer: the briefing is
+    /// then made from Git alone.
+    fn conversation_digest(
+        &self,
+        _session: &SessionId,
+        _cwd: &Path,
+        _since_unix: Option<u64>,
+    ) -> Option<ConversationDigest> {
+        None
     }
 
     // ── Back to delivery ───────────────────────────────────────────────

@@ -81,6 +81,7 @@ impl Attach<'_> {
             Some(target) => PlacementRequest::Resume {
                 primary: target.primary,
                 task: target.task,
+                harness,
             },
             // Placed from where the space is now — its own shell's
             // directory, which a `cd` there moves (see `space_cwd`) —
@@ -122,18 +123,7 @@ impl Attach<'_> {
     /// it is an agent UZE launched, it has no checkout yet, and the
     /// space it stands in is a repository with a commit to branch from.
     pub(super) fn can_isolate(&self, tab: TabId) -> bool {
-        let Some(session) = self.model.session.as_ref() else {
-            return false;
-        };
-        let Some(space) = session
-            .workspace
-            .spaces
-            .iter()
-            .find(|space| space.tabs.iter().any(|candidate| candidate.id == tab))
-        else {
-            return false;
-        };
-        let Some(found) = space.tabs.iter().find(|candidate| candidate.id == tab) else {
+        let Some((space, found)) = self.space_and_tab(tab) else {
             return false;
         };
         if launched_agent_id(found).is_none() {
@@ -154,13 +144,20 @@ impl Attach<'_> {
             .contains_key(&evaluation_key(&space_cwd(space, &self.identities)))
     }
 
-    /// Gives one agent a checkout of its own and relaunches it there,
-    /// continuing the conversation it is in.
-    ///
-    /// The same three steps a resume takes — place, open the tab, close
-    /// the one it took over from — because that is what moving an agent
-    /// between directories is: a process cannot be told to stand
-    /// somewhere else.
+    /// The space `tab` stands in, and the tab.
+    fn space_and_tab(&self, tab: TabId) -> Option<(&Space, &Tab)> {
+        self.model
+            .session
+            .as_ref()?
+            .workspace
+            .spaces
+            .iter()
+            .find_map(|space| {
+                let found = space.tabs.iter().find(|candidate| candidate.id == tab)?;
+                Some((space, found))
+            })
+    }
+
     pub(in crate::ui::orchestrator) fn perform_menu_action(
         &mut self,
         target: MenuTarget,
@@ -188,27 +185,186 @@ impl Attach<'_> {
         self.model.dirty = true;
     }
 
+    /// Opens the selected tab's menu where its row is, the menu a right-click
+    /// on that row opens: one key for every action of an agent, and Up,
+    /// Down, Right and Enter to reach any of them.
+    pub(super) fn open_tab_menu_from_the_keyboard(&mut self) {
+        let Some(tab) = self.model.selected_tab() else {
+            return;
+        };
+        let row = self.model.hits.iter().find_map(|(rect, hit)| match hit {
+            WorkspaceHit::SelectTab(found) if *found == tab => Some(*rect),
+            _ => None,
+        });
+        // Under the row's label, as a pointer on it would have put it; the
+        // pane's corner when the row is not drawn (a folded space).
+        let anchor = row.map_or_else(
+            || Rect::new(0, 0, 1, 1),
+            |row| Rect::new(row.x + 2, row.y, 1, 1),
+        );
+        self.model.context_menu = Some(self.tab_menu(tab, anchor));
+        self.model.dirty = true;
+    }
+
+    /// The menu a tab's row opens, by the pointer or by `Alt+.`.
+    pub(super) fn tab_menu(&self, tab: TabId, anchor: Rect) -> ContextMenu {
+        let mut items = vec![Action::RenameSelection];
+        // Offered only where it can be honoured: an agent
+        // already in a checkout of its own has nothing to be
+        // given, and a directory that is no repository has
+        // nothing to cut one from.
+        if self.can_isolate(tab) {
+            // Isolating takes the work with it: at the moment
+            // an agent is moved, what the tree holds is
+            // usually what that agent was doing, and a
+            // checkout without it is one where the file it
+            // was mid-edit on went back to its last commit.
+            items.push(Action::IsolateAgent);
+            // Starting from the commit instead is the
+            // exception, and it is offered only where it is
+            // one: a tree the last evaluation found dirty.
+            // Gated this way round on purpose — the answer
+            // can be up to a refresh old, and a stale *clean*
+            // reading costs the operator nothing, where a
+            // stale reading on the carrying row would take
+            // away the very thing they had just edited.
+            if self
+                .model
+                .tab_task(tab)
+                .is_some_and(|task| task.state == WorkStateView::Uncommitted)
+            {
+                items.push(Action::IsolateAgentAtCommit);
+            }
+        }
+        if can_close_tab_from_menu(&self.model, &self.identities, tab) {
+            items.push(Action::CloseTab);
+        }
+        // Right after the name: continuing elsewhere is what a
+        // person reaches for when this harness stopped working.
+        ContextMenu::new(MenuTarget::Tab(tab), items, anchor)
+            .offering_switches(1, self.switch_choices(tab))
+    }
+
+    /// The harnesses `tab`'s agent could continue in: every one set up for
+    /// the workspace except the one it runs. Offered only while that
+    /// harness is alive in the pane, since a tab whose agent exited is
+    /// resumed from recent, where a harness is picked anyway.
+    pub(super) fn switch_choices(&self, tab: TabId) -> Vec<HarnessChoice> {
+        let Some((_, found)) = self.space_and_tab(tab) else {
+            return Vec::new();
+        };
+        if launched_agent_id(found).is_none() {
+            return Vec::new();
+        }
+        let Some(current) = agent_for_tab(&self.identities, found) else {
+            return Vec::new();
+        };
+        self.identities
+            .iter()
+            .filter(|identity| identity.configured && identity.integration != current.integration)
+            .map(|identity| HarnessChoice {
+                integration: identity.integration.to_owned(),
+                display_name: identity.display_name.to_owned(),
+                continuity_gap: identity.continuity_gap.clone(),
+            })
+            .collect()
+    }
+
+    /// Relaunches `target`'s agent on `choice`'s harness, in the place it
+    /// stands, replacing its tab — or, when it is mid-turn and the operator
+    /// has not `confirmed` it, asks first, since the relaunch ends whatever
+    /// it is doing.
+    pub(in crate::ui::orchestrator) fn continue_in(
+        &mut self,
+        target: MenuTarget,
+        choice: HarnessChoice,
+        confirmed: bool,
+    ) {
+        let MenuTarget::Tab(tab) = target else {
+            return;
+        };
+        let Some((agent, label, from_harness, from, pane)) =
+            self.space_and_tab(tab).and_then(|(space, found)| {
+                Some((
+                    launched_agent_id(found)?.to_owned(),
+                    found.label.clone(),
+                    agent_for_tab(&self.identities, found)?
+                        .integration
+                        .to_owned(),
+                    space_cwd(space, &self.identities),
+                    found.pane.id,
+                ))
+            })
+        else {
+            return;
+        };
+        if !confirmed && self.model.agent_tab_status(pane, false) == AgentTabStatus::Working {
+            self.model.interrupt = Some(InterruptDialog {
+                target,
+                label,
+                choice,
+                on_confirm: false,
+            });
+            return;
+        }
+        let Some(launch) = self
+            .identities
+            .iter()
+            .find(|identity| identity.integration == choice.integration)
+            .map(|identity| identity.launch.to_string_lossy().into_owned())
+        else {
+            return;
+        };
+        if self.model.placement_pending {
+            return;
+        }
+        if let Some(gap) = &choice.continuity_gap {
+            self.model
+                .raise_toast(ToastKind::Warned, gap, label.clone(), None);
+        }
+        self.model.placement_pending = true;
+        self.model
+            .set_busy_notice(format!("{label}: continuing in {}", choice.display_name));
+        spawn_agent_placement(
+            self.home,
+            PlacementRequest::Switch {
+                from,
+                agent,
+                was: from_harness,
+                to: choice.integration,
+            },
+            Vec::new(),
+            label,
+            vec![launch],
+            Some(tab),
+            self.channels.placements.sender.clone(),
+        );
+    }
+
+    /// Gives one agent a checkout of its own and relaunches it there,
+    /// continuing the conversation it is in.
+    ///
+    /// The same three steps a resume takes — place, open the tab, close
+    /// the one it took over from — because that is what moving an agent
+    /// between directories is: a process cannot be told to stand
+    /// somewhere else.
     pub(super) fn isolate_agent(&mut self, target: MenuTarget, carry: uze_application::Carry) {
         let MenuTarget::Tab(tab) = target else {
             return;
         };
-        let Some((agent, label, harness, from)) = self.model.session.as_ref().and_then(|session| {
-            let space = session
-                .workspace
-                .spaces
-                .iter()
-                .find(|space| space.tabs.iter().any(|candidate| candidate.id == tab))?;
-            let found = space.tabs.iter().find(|candidate| candidate.id == tab)?;
-            Some((
-                // The identity the launch stamped: the one thing that
-                // survives the agent moving, and what the isolation is
-                // recorded against.
-                launched_agent_id(found)?.to_owned(),
-                found.label.clone(),
-                agent_for_tab(&self.identities, found)?.launch.clone(),
-                space_cwd(space, &self.identities),
-            ))
-        }) else {
+        let Some((agent, label, harness, from)) =
+            self.space_and_tab(tab).and_then(|(space, found)| {
+                Some((
+                    // The identity the launch stamped: the one thing that
+                    // survives the agent moving, and what the isolation is
+                    // recorded against.
+                    launched_agent_id(found)?.to_owned(),
+                    found.label.clone(),
+                    agent_for_tab(&self.identities, found)?.launch.clone(),
+                    space_cwd(space, &self.identities),
+                ))
+            })
+        else {
             return;
         };
         let command = vec![harness.to_string_lossy().into_owned()];

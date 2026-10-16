@@ -79,6 +79,11 @@ pub struct HarnessConversation {
     /// that same value means nothing new was started, so the previous
     /// occupant's conversation can never be adopted.
     pub preceded_by: Option<SessionId>,
+    /// When the agent last moved on from this harness to another one. A
+    /// resume records no launch, so this is the only mark of when a
+    /// harness that comes back stopped following the work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_at_unix: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -88,6 +93,18 @@ pub struct ConversationRecord {
     /// Keyed by integration id, so a fifth harness adds a key rather than a
     /// shape.
     pub harnesses: BTreeMap<String, HarnessConversation>,
+    /// A briefing written for the next launch of one harness, given once
+    /// and cleared by that launch. Where it is, never what it says: the
+    /// record holds no conversation text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub briefing: Option<PendingBriefing>,
+}
+
+/// A briefing waiting for the launch it was written for.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PendingBriefing {
+    pub integration: String,
+    pub path: PathBuf,
 }
 
 impl ConversationRecord {
@@ -96,7 +113,17 @@ impl ConversationRecord {
             schema_version: SCHEMA_VERSION,
             agent,
             harnesses: BTreeMap::new(),
+            briefing: None,
         }
+    }
+
+    /// Takes the briefing pending for `integration`, leaving one written
+    /// for any other harness where it is.
+    pub fn take_briefing(&mut self, integration: &str) -> Option<PathBuf> {
+        if self.briefing.as_ref()?.integration != integration {
+            return None;
+        }
+        self.briefing.take().map(|pending| pending.path)
     }
 
     pub fn get(&self, integration: &str) -> Option<&HarnessConversation> {
@@ -121,8 +148,16 @@ impl ConversationRecord {
                 launched_at_unix: now_unix(),
                 observed_at_unix: None,
                 preceded_by,
+                left_at_unix: None,
             },
         );
+    }
+
+    /// Marks that the agent moved on from `integration` now.
+    pub fn left(&mut self, integration: &str) {
+        if let Some(entry) = self.harnesses.get_mut(integration) {
+            entry.left_at_unix = Some(now_unix());
+        }
     }
 
     /// Writes back what was observed for `launched_at_unix`'s launch.
@@ -154,7 +189,7 @@ pub fn store_path(home: &UzeHome, project_root: &Path, agent: &AgentId) -> PathB
     home.conversation_path(&project_id(project_root), agent.as_str())
 }
 
-fn project_id(project_root: &Path) -> String {
+pub(crate) fn project_id(project_root: &Path) -> String {
     let canonical = project_root
         .canonical()
         .unwrap_or_else(|_| project_root.to_path_buf());
@@ -261,6 +296,7 @@ pub(crate) fn claimed_by_others(
 /// that is already gone is the outcome asked for.
 pub fn forget(home: &UzeHome, project_root: &Path, agent: &AgentId) {
     let _ = fs::remove_file(store_path(home, project_root, agent));
+    let _ = fs::remove_file(home.briefing_path(&project_id(project_root), agent.as_str()));
 }
 
 /// The agent a verified claim resolved to, which kind of record it is, and
@@ -363,6 +399,29 @@ mod tests {
         agent.isolation_mut().unwrap().checkout =
             Some(crate::checkout::CheckoutId::adopted(checkout));
         agent
+    }
+
+    #[test]
+    fn a_record_written_before_briefings_reads_with_none_pending() {
+        let record: ConversationRecord =
+            serde_json::from_slice(br#"{"schema_version":2,"agent":"x","harnesses":{}}"#).unwrap();
+        assert_eq!(record.briefing, None);
+        assert!(
+            !serde_json::to_string(&record).unwrap().contains("briefing"),
+            "nothing pending writes nothing"
+        );
+    }
+
+    #[test]
+    fn a_briefing_is_taken_only_by_the_harness_it_was_written_for() {
+        let mut record = ConversationRecord::new(AgentId::adopted("x"));
+        record.briefing = Some(PendingBriefing {
+            integration: "codex".into(),
+            path: PathBuf::from("/b.md"),
+        });
+        assert_eq!(record.take_briefing("claude"), None);
+        assert_eq!(record.take_briefing("codex"), Some(PathBuf::from("/b.md")));
+        assert_eq!(record.take_briefing("codex"), None);
     }
 
     #[test]

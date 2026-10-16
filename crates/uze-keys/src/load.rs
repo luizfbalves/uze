@@ -331,6 +331,9 @@ fn default_bindings() -> Vec<Binding> {
         // before the pane ever sees it.
         bind(Scope::Surfaces, "alt+x", Action::ToggleSpec),
         bind(Scope::Workspace, "alt+n", Action::NewAgent),
+        // The same key the code surface opens a row's actions with, under
+        // the modifier the pane leaves free: the selected agent's menu.
+        bind(Scope::Workspace, "alt+.", Action::OpenMenu),
         // The container of agents, beside the agent's own chord: `s` for
         // space, on the same modifier.
         bind(Scope::Workspace, "alt+s", Action::NewSpace),
@@ -399,9 +402,10 @@ fn default_bindings() -> Vec<Binding> {
         bind(Scope::Code, "p", Action::TogglePreview),
         bind(Scope::Code, "m", Action::ToggleMap),
         bind(Scope::Code, "d", Action::DeleteFile),
-        // Not a letter: it opens a list of actions rather than naming one,
-        // and a letter names one action everywhere.
-        bind(Scope::Code, ".", Action::OpenMenu),
+        // The key that opens what can be done to what is selected, here and
+        // over the pane alike: not a letter, because it opens a list of
+        // actions rather than naming one.
+        bind(Scope::Code, "alt+.", Action::OpenMenu),
         // Typing has a scope of its own so nothing behind it answers a
         // letter — the same reason the action index has one.
         bind(Scope::CodeEditing, "esc", Action::Dismiss),
@@ -455,6 +459,8 @@ fn default_bindings() -> Vec<Binding> {
         bind(Scope::ContextMenu, "down", Action::SelectNext),
         bind(Scope::ContextMenu, "up", Action::SelectPrevious),
         bind(Scope::ContextMenu, "enter", Action::Activate),
+        bind(Scope::ContextMenu, "right", Action::FocusNext),
+        bind(Scope::ContextMenu, "left", Action::FocusPrevious),
         bind(Scope::ContextMenu, "esc", Action::Dismiss),
         bind(Scope::RootPicker, "down", Action::SelectNext),
         bind(Scope::RootPicker, "up", Action::SelectPrevious),
@@ -606,6 +612,9 @@ mod tests {
                 // the cursor.
                 "isolate-agent",
                 "isolate-agent-at-commit",
+                // The same, and the menu is also what names the harness
+                // the agent continues in.
+                "switch-harness",
                 // The list of areas is one step left of the list of
                 // artifacts, which has the key: `o`, then the arrow. A
                 // letter of its own would be one of the four nobody could

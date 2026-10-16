@@ -38,6 +38,7 @@ use uze_core::{
     store::StoredPackage,
 };
 
+mod digest;
 mod generate;
 mod hooks;
 mod mcp;
@@ -247,6 +248,22 @@ impl IntegrationPort for ClaudeIntegration {
         session: &uze_core::session::SessionId,
     ) -> Vec<std::ffi::OsString> {
         session::resume_args(session)
+    }
+
+    fn first_turn_args(&self, turn: &str) -> Vec<std::ffi::OsString> {
+        session::first_turn_args(turn)
+    }
+
+    fn conversation_digest(
+        &self,
+        session: &uze_core::session::SessionId,
+        cwd: &Path,
+        since_unix: Option<u64>,
+    ) -> Option<uze_core::session::ConversationDigest> {
+        digest::read(
+            &session::transcript_path(&self.transcripts_root, cwd, session),
+            since_unix,
+        )
     }
 
     fn observe_session(

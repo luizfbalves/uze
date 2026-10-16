@@ -216,6 +216,10 @@ actions! {
         "To worktree, no changes",
         "Move this agent into a worktree cut from the last commit; the \
          uncommitted changes stay here";
+    SwitchHarness => "switch-harness", false,
+        "Continue in",
+        "Relaunch this agent on another harness in the same checkout, \
+         briefed on what it was doing";
     NewSpace => "new-space", false,
         "New space", "Open a space at a directory";
     RenameSelection => "rename-selection", false,
@@ -277,7 +281,7 @@ actions! {
     SaveFile => "save-file", false,
         "Save", "Write what was typed back to the file";
     OpenMenu => "open-menu", false,
-        "Actions", "Open what can be done to the selected change: open it, copy its path, discard it";
+        "Actions", "Open what can be done to what is selected: an agent, or a change in the code surface";
     DeleteFile => "delete-file", true,
         "Delete", "Delete the selected file, having been asked once";
     CaretLeft => "caret-left", false,

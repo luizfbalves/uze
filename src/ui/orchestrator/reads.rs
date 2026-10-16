@@ -822,6 +822,14 @@ pub(super) enum PlacementRequest {
     Resume {
         primary: PathBuf,
         task: String,
+        harness: String,
+    },
+    /// The agent continuing on another harness, where it already stands.
+    Switch {
+        from: PathBuf,
+        agent: String,
+        was: String,
+        to: String,
     },
 }
 
@@ -832,6 +840,7 @@ impl PlacementRequest {
             Self::New { .. } => "new",
             Self::Isolate { .. } => "isolate",
             Self::Resume { .. } => "resume",
+            Self::Switch { .. } => "switch",
         }
     }
 
@@ -841,7 +850,7 @@ impl PlacementRequest {
     /// worth having written down.
     pub(super) fn from(&self) -> &Path {
         match self {
-            Self::New { from, .. } | Self::Isolate { from, .. } => from,
+            Self::New { from, .. } | Self::Isolate { from, .. } | Self::Switch { from, .. } => from,
             Self::Resume { primary, .. } => primary,
         }
     }
@@ -898,8 +907,23 @@ pub(super) fn spawn_agent_placement(
                 PlacementRequest::Isolate { from, agent, carry } => tui_application(home)
                     .and_then(|app| app.workspace().isolate(&from, &agent, carry, &occupied))
                     .map_err(|error| error.to_string()),
-                PlacementRequest::Resume { primary, task } => tui_application(home)
-                    .and_then(|app| app.workspace().resume_task(&primary, &task, &occupied))
+                PlacementRequest::Switch {
+                    from,
+                    agent,
+                    was,
+                    to,
+                } => tui_application(home)
+                    .and_then(|app| app.workspace().switch_harness(&from, &agent, &was, &to))
+                    .map_err(|error| error.to_string()),
+                PlacementRequest::Resume {
+                    primary,
+                    task,
+                    harness,
+                } => tui_application(home)
+                    .and_then(|app| {
+                        app.workspace()
+                            .resume_task(&primary, &task, &harness, &occupied)
+                    })
                     .map_err(|error| error.to_string()),
             },
             Err("placing the agent failed".to_owned()),

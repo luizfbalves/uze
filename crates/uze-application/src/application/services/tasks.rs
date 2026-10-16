@@ -11,7 +11,7 @@ use std::cell::OnceCell;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use uze_core::{Result, UzeError, UzeHome, anchor, manifest};
+use uze_core::{Result, UzeError, UzeHome, anchor, integration::IntegrationPort, manifest};
 
 use uze_workspace::{
     checkout, client_layout,
@@ -30,6 +30,7 @@ mod naming;
 mod occupancy;
 mod placement;
 mod repository;
+mod switch;
 mod views;
 
 pub use naming::*;
@@ -160,13 +161,18 @@ impl Workspace<'_> {
     /// way of having nothing to say.
     #[tracing::instrument(name = "workspace.refresh_conversation", skip_all, fields(integration = %integration, agent = %claim.id, cwd = %claim.cwd.display()))]
     pub fn refresh_conversation(&self, integration: &str, claim: Claim<'_>) -> bool {
+        self.integration(integration).is_some_and(|integration| {
+            uze_workspace::continuity::refresh(&self.0.home, claim, integration)
+        })
+    }
+
+    /// The registered integration whose id is `id`.
+    pub(super) fn integration(&self, id: &str) -> Option<&dyn IntegrationPort> {
         self.0
             .integrations
             .iter()
-            .find(|candidate| candidate.id() == integration)
-            .is_some_and(|integration| {
-                uze_workspace::continuity::refresh(&self.0.home, claim, integration.as_ref())
-            })
+            .find(|candidate| candidate.id() == id)
+            .map(|found| found.as_ref())
     }
 
     /// Recent prompts submitted into the agent tabs of `root`'s workspace.

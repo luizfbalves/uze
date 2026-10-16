@@ -137,6 +137,10 @@ fn affordances() -> BTreeMap<Action, Affordance> {
         Control("an agent row's actions, where the tree is dirty"),
     );
     put(
+        Action::SwitchHarness,
+        Control("an agent row's actions, one entry per other harness"),
+    );
+    put(
         Action::RenameSelection,
         Control("double-clicking the label, or the row's actions"),
     );
@@ -220,7 +224,10 @@ fn affordances() -> BTreeMap<Action, Affordance> {
     put(Action::DeleteFile, Index);
     put(
         Action::OpenMenu,
-        Control("the secondary button on a changed file's row in the code surface"),
+        Control(
+            "the secondary button on a changed file's row in the code surface, and a \
+             right-click on an agent's row",
+        ),
     );
     put(
         Action::TogglePreview,

@@ -24,6 +24,21 @@ impl Workspace<'_> {
             .map(|agent| (agent.created_at_unix, agent.id.as_str().to_owned()))
             .collect();
         ready.sort();
+        // One refusal says it: the project delivers nothing, whichever task.
+        if repository.policy.completion.is_none() {
+            return ready
+                .first()
+                .and_then(|(_, id)| {
+                    self.refused_delivery(
+                        &repository.primary,
+                        &repository.policy,
+                        id,
+                        undeclared_delivery(),
+                    )
+                })
+                .into_iter()
+                .collect();
+        }
         // One claim per task, in order, so the second is claimed against
         // what the first wrote: the listing is only a listing, and the
         // document decides under the lock each delivery takes for itself.
@@ -64,6 +79,9 @@ impl Workspace<'_> {
         policy: &WorktreePolicy,
         task_id: &str,
     ) -> Option<DeliveryReport> {
+        if policy.completion.is_none() {
+            return self.refused_delivery(primary, policy, task_id, undeclared_delivery());
+        }
         if let Some(waiting) = self.unjoined_children(primary, task_id) {
             return self.refused_delivery(primary, policy, task_id, waiting);
         }
@@ -120,7 +138,7 @@ impl Workspace<'_> {
                     primary,
                     policy,
                     task_id,
-                    format!("the delivery could not start: {error}"),
+                    format!("could not start: {error}"),
                 );
             }
         };
@@ -133,8 +151,8 @@ impl Workspace<'_> {
                 &RootStanding::default(),
                 &agent,
                 policy.completion,
+                &declaration::instructions(primary),
                 &target_of(primary, policy),
-                landing::forge(primary),
             ),
             outcome,
             warnings: Vec::new(),
@@ -182,12 +200,7 @@ impl Workspace<'_> {
                     .then_some(child.label.as_str())
             })
             .collect();
-        (!waiting.is_empty()).then(|| {
-            format!(
-                "its subagents hold work not joined yet ({}); join them first",
-                waiting.join(", ")
-            )
-        })
+        (!waiting.is_empty()).then(|| format!("unjoined subagents: {}", waiting.join(", ")))
     }
 
     /// The report for a delivery that never started: the task as the
@@ -214,13 +227,19 @@ impl Workspace<'_> {
                 &RootStanding::default(),
                 agent,
                 policy.completion,
+                &declaration::instructions(primary),
                 &target_of(primary, policy),
-                landing::forge(primary),
             ),
             outcome: DeliveryOutcome::Refused(reason),
             warnings: Vec::new(),
         })
     }
+}
+
+/// Why a project with no `delivery:` delivers nothing: there is nowhere it
+/// said the work should go.
+pub(super) fn undeclared_delivery() -> String {
+    "no `delivery:` in agents.yaml".to_owned()
 }
 
 /// What a delivery that landed but could not be written down leaves the
@@ -282,59 +301,24 @@ pub(super) fn deliver_one(
     id: &AgentId,
     agent: &mut Agent,
 ) -> DeliveryOutcome {
+    let Some(completion) = consent.policy().completion else {
+        return DeliveryOutcome::Refused(undeclared_delivery());
+    };
     let policy = landing::Policy {
-        completion: consent.policy().completion,
+        completion,
         gate: consent.gate(),
         vocabulary: &consent.policy().branch,
     };
-    // Kept for the messages below, which describe the branch rather than
-    // the outcome; delivery itself writes through the agent.
-    let task = agent.isolation().cloned();
-    let task = task.as_ref();
     match landing::deliver(primary, agent, &policy) {
-        Ok(Delivered::Handoff) => DeliveryOutcome::Handoff,
         Ok(Delivered::Merged { .. }) => DeliveryOutcome::Merged,
         Ok(Delivered::Published { branch, request }) => {
             DeliveryOutcome::Published { branch, request }
         }
-        Ok(Delivered::AwaitingRequest {
-            branch: _,
-            instruction,
-        }) => DeliveryOutcome::AwaitingRequest(AgentNotice {
-            task: id.as_str().to_owned(),
-            checkout: task
-                .and_then(|task| landing::slot_path(primary, task))
-                .unwrap_or_default(),
-            message: instruction,
-        }),
-        Err(DeliveryFailure::Conflict {
-            files,
-            target_moved,
-        }) => DeliveryOutcome::ReturnedToAgent(AgentNotice {
-            task: id.as_str().to_owned(),
-            checkout: task
-                .and_then(|task| landing::slot_path(primary, task))
-                .unwrap_or_default(),
-            message: landing::conflict_message(
-                task.expect("delivery needs isolation"),
-                &files,
-                target_moved,
-            ),
-        }),
-        Err(DeliveryFailure::GateFailed { command, output }) => {
-            DeliveryOutcome::ReturnedToAgent(AgentNotice {
-                task: id.as_str().to_owned(),
-                checkout: task
-                    .and_then(|task| landing::slot_path(primary, task))
-                    .unwrap_or_default(),
-                message: landing::gate_failure_message(
-                    task.expect("delivery needs isolation"),
-                    &command,
-                    &output,
-                    keep_gate_output(home, id, &output).as_deref(),
-                ),
-            })
-        }
+        Err(DeliveryFailure::Conflict { files, .. }) => DeliveryOutcome::Conflicted { files },
+        Err(DeliveryFailure::GateFailed { command, output }) => DeliveryOutcome::Failed {
+            log: keep_gate_output(home, id, &output),
+            command,
+        },
         Err(other) => DeliveryOutcome::Refused(other.to_string()),
     }
 }

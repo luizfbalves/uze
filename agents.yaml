@@ -10,10 +10,20 @@ workspace:
   # only when somebody asked.
   worktree: always
 
-  # UZE rebases an agent's branch onto the target, runs the checks, pushes
-  # it, and asks the agent to open the request. The workspace keeps
-  # AGENTS.md's "Concurrent work isolation" section in step with it.
-  delivery: pr
+  # UZE rebases an agent's branch onto the target, runs the checks and
+  # pushes it; it never opens a request. The workspace keeps AGENTS.md's
+  # "Concurrent work isolation" section in step with it.
+  delivery: push
+
+  # What the agent is asked when UZE leaves its work in a state, and when
+  # its status in the workspace's tab strip is clicked. One line each, sent as
+  # the operator would type it. `on_change` asks about uncommitted work and is
+  # sent only on a click; the other three also follow UZE's own operations.
+  actions:
+    on_change: Commit your work with the git:commit skill.
+    on_publish: Open a pull request for this branch with the git:pr skill.
+    on_conflict: Resolve the rebase conflicts, then run git rebase --continue and the checks.
+    on_fail: Fix the failing checks and commit with the git:commit skill.
 
   # An agent names its own work as its first action
   # (`uze agent work name <type>/<subject>`); work that reaches a commit

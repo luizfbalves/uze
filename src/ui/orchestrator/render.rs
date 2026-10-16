@@ -9,8 +9,8 @@ use super::*;
 use crate::ui::Rows;
 use crate::ui::theme::{self, Symbol, Token};
 use crate::ui::widget::{
-    self, Chip, ChipState, Edge, POPUP_H_PAD, POPUP_V_PAD, Rule, Surface, TRAILING_PAD,
-    action_index, chip, mark, row, text,
+    self, ChipState, Edge, POPUP_H_PAD, POPUP_V_PAD, Rule, Status, StatusKind, Surface,
+    TRAILING_PAD, action_index, chip, mark, row, text,
 };
 
 mod pane;
@@ -510,9 +510,9 @@ fn push_trailing_controls(
     // (`caption_color`), because this is where the next one lands —
     // held back until the pointer asks for it, so the row's one
     // coloured word does not outshout the name beside it.
-    let hue = match chip_state(model, Some(WorkspaceHit::NewAgentMenu)) {
+    let hue = match chip_state(model, WorkspaceHit::NewAgentMenu) {
         ChipState::Hovered | ChipState::Pressed => Token::StateWarning,
-        ChipState::Resting | ChipState::Static => Token::StateWarningMuted,
+        ChipState::Resting => Token::StateWarningMuted,
     };
     // Ahead of the row's own `SelectSpace`, so it wins the click.
     hits.push((
@@ -540,23 +540,16 @@ fn push_trailing_controls(
 /// ride inside anything — it stands alone in its zone. At that size two
 /// small digits beside an arrow read as a smudge on the arrow rather than
 /// as a number, which is the one thing a count has to be.
-fn sync_counts(model: &WorkspaceModel, cwd: &Path) -> Vec<Span<'static>> {
+fn upstream_sync(model: &WorkspaceModel, cwd: &Path) -> Option<uze_application::UpstreamSync> {
     if !is_unisolated(cwd) {
-        return Vec::new();
+        return None;
     }
-    let Some(sync) = model.remembered.upstream_syncs.get(&evaluation_key(cwd)) else {
-        return Vec::new();
-    };
-    [
-        (Symbol::SyncBehind, sync.pull, Token::StateDanger),
-        (Symbol::SyncAhead, sync.push, Token::StateSuccess),
-    ]
-    .into_iter()
-    .filter(|(_, count, _)| *count > 0)
-    .map(|(arrow, count, hue)| {
-        Span::styled(format!("{}{count}", theme::glyph(arrow)), theme::fg(hue))
-    })
-    .collect()
+    model
+        .remembered
+        .upstream_syncs
+        .get(&evaluation_key(cwd))
+        .copied()
+        .filter(|sync| sync.pull > 0 || sync.push > 0)
 }
 
 /// The stack of outcomes, against the top-right of the pane.

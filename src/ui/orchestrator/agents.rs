@@ -97,8 +97,40 @@ impl WorkspaceModel {
         task.state.clone()
     }
 
+    /// What a click on `task`'s status does, or `None` where it does
+    /// nothing: ready work is delivered, as the deliver key does, and any
+    /// other state sends the instruction the project declares for it. In
+    /// flight, nothing — the work is already being handed over. The one
+    /// place this is decided, so what the status looks like, what its
+    /// hint says and what the click does cannot come to disagree.
+    pub(in crate::ui) fn status_answer(&self, task: &AgentView) -> Option<StatusAnswer> {
+        match self.drawn_state(task) {
+            WorkStateView::Integrating => None,
+            WorkStateView::Ready => Some(StatusAnswer::Deliver),
+            state => {
+                task.action.as_ref()?;
+                state.answered_by().map(StatusAnswer::Send)
+            }
+        }
+    }
+
     pub(super) fn pane_cwd(&self, pane: PaneId) -> Option<PathBuf> {
         self.tab_of_pane(pane).map(|tab| tab.pane.cwd.clone())
+    }
+
+    /// Whether `pane` may take a submission of UZE's now: never into an
+    /// agent mid-turn, and never on top of something the operator typed,
+    /// or may have typed — a line this client cannot vouch for counts as
+    /// typed, since sending into it would carry their words with ours.
+    pub(super) fn may_submit(&self, pane: PaneId) -> Submission {
+        if self.agent_is_working(pane) {
+            return Submission::Busy;
+        }
+        match self.remembered.prompt_buffers.get(&pane) {
+            Some(buffer) if !buffer.trusted => Submission::Unknown,
+            Some(buffer) if !buffer.characters.is_empty() => Submission::Typed,
+            _ => Submission::Ok,
+        }
     }
 
     /// The pane of the tab launched for agent `id` — where a message for
@@ -133,6 +165,32 @@ impl WorkspaceModel {
             .iter()
             .filter(|work| !live.contains(work.id.as_str()))
             .collect()
+    }
+
+    /// Every checkout whose state the workspace draws, with the name its
+    /// work was published under: each open space's own root, and the
+    /// checkout of every agent recorded in one of those repositories that
+    /// still has one. A repository no space is open on is not watched.
+    pub(super) fn watched_checkouts(
+        &self,
+        identities: &[AgentIdentity],
+    ) -> Vec<(PathBuf, Option<String>)> {
+        let roots = self.space_directories(identities);
+        let open: BTreeSet<PathBuf> = roots.iter().map(|root| evaluation_key(root)).collect();
+        let mut checkouts: BTreeMap<PathBuf, Option<String>> =
+            roots.into_iter().map(|root| (root, None)).collect();
+        checkouts.extend(
+            self.remembered
+                .tasks
+                .iter()
+                .filter(|(primary, _)| open.contains(*primary))
+                .flat_map(|(_, tasks)| tasks)
+                .filter(|task| {
+                    !matches!(task.state, WorkStateView::Closed | WorkStateView::Shelved)
+                })
+                .filter_map(|task| Some((task.checkout.clone()?, task.published_as.clone()))),
+        );
+        checkouts.into_iter().collect()
     }
 
     /// The directory each space's header reads its branch and its sync
@@ -177,4 +235,12 @@ impl WorkspaceModel {
         unread.dedup();
         unread
     }
+}
+
+/// What a click on a work-state status does: see
+/// [`WorkspaceModel::status_answer`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::ui) enum StatusAnswer {
+    Deliver,
+    Send(uze_application::ActionState),
 }

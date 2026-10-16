@@ -6,14 +6,18 @@
 //! workspace's to report: a package command never parses it, so it never
 //! fails over it.
 //!
-//! One flat section holds two things the workspace reads apart: the policy
-//! for the agents it launches, and the places the project keeps the
-//! artifacts that describe it. A section that declares only the places
-//! declares no policy, so the policy is still attributed to the default;
-//! an empty one written on purpose (`workspace: {}`) declares the defaults,
-//! as choosing them is.
+//! One flat section holds three things the workspace reads apart: the
+//! policy for the agents it launches, the places the project keeps the
+//! artifacts that describe it, and what an agent is asked at each state its
+//! work reaches. A section that declares only places or actions declares no
+//! policy, so the policy is still attributed to the default; an empty one
+//! written on purpose (`workspace: {}`) declares the defaults, as choosing
+//! them is.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +29,88 @@ use crate::{
 
 /// The key under `workspace:` that names places rather than policy.
 const ARTIFACTS: &str = "artifacts";
+
+/// The key under `workspace:` that names what an agent is asked, rather
+/// than policy.
+const ACTIONS: &str = "actions";
+
+/// When an instruction is sent: the moment work reaches a state the
+/// workspace shows. Named for the moment, never for a deed — what is asked
+/// then is the instruction's own text — and its own vocabulary rather than
+/// the view's, so a state added to what a surface draws is never accepted
+/// here silently.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum ActionState {
+    OnChange,
+    OnPublish,
+    OnConflict,
+    OnFail,
+}
+
+impl ActionState {
+    pub const ALL: [Self; 4] = [
+        Self::OnChange,
+        Self::OnPublish,
+        Self::OnConflict,
+        Self::OnFail,
+    ];
+
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::OnChange => "on_change",
+            Self::OnPublish => "on_publish",
+            Self::OnConflict => "on_conflict",
+            Self::OnFail => "on_fail",
+        }
+    }
+
+    /// What is asked when the project declares nothing for this moment.
+    /// Only the two moments where UZE itself left the agent's checkout in
+    /// a state nobody but the agent can settle — a paused rebase, a branch
+    /// the gate refused — have one: unsaid, the agent would sit in front
+    /// of work it does not know is waiting.
+    pub const fn fallback(self) -> Option<&'static str> {
+        match self {
+            Self::OnConflict => Some(
+                "Your branch no longer rebases onto its target, and the rebase is paused in \
+                 this checkout. Resolve the conflicts preserving the intent of your change, \
+                 run git rebase --continue, run the project's checks, and end your turn.",
+            ),
+            Self::OnFail => Some(
+                "The project's checks failed on your branch after it was rebased onto its \
+                 target. Fix them on this branch, commit, and end your turn.",
+            ),
+            Self::OnChange | Self::OnPublish => None,
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|state| state.key() == key)
+    }
+}
+
+/// What the project asks an agent at each state, and what it wrote under
+/// `actions` that asks nothing.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DeclaredActions {
+    pub instructions: BTreeMap<ActionState, String>,
+    /// Each entry left out, said as the reason: an unknown key, or a value
+    /// that is not a non-empty line of text.
+    pub ignored: Vec<String>,
+}
+
+impl DeclaredActions {
+    /// What is asked at each moment: the project's instruction where it
+    /// declares one, the [`ActionState::fallback`] where it does not.
+    pub fn with_fallbacks(&self) -> BTreeMap<ActionState, String> {
+        let mut instructions: BTreeMap<ActionState, String> = ActionState::ALL
+            .into_iter()
+            .filter_map(|state| Some((state, state.fallback()?.to_owned())))
+            .collect();
+        instructions.extend(self.instructions.clone());
+        instructions
+    }
+}
 
 /// The isolation policy the project declares, or `None` when it declares
 /// none. Validated as the workspace uses it: a linked file must be one the
@@ -47,12 +133,21 @@ pub fn policy(root: &Path) -> Result<WorktreePolicy> {
     Ok(declared(root)?.unwrap_or_default())
 }
 
-/// Declares the delivery behavior, creating the manifest when the project
-/// has none, and reports whether it had to — a caller showing a person the
-/// consequence of their click says "this creates a tracked file" before it
-/// happens rather than after.
-pub fn set_completion(root: &Path, behavior: CompletionBehavior) -> Result<bool> {
-    let created = manifest::set_scalar(root, Section::Workspace, "delivery", behavior.abi_name())?;
+/// Declares the delivery behavior, or takes the declaration back with
+/// `None`, creating the manifest when the project has none, and reports
+/// whether it had to — a caller showing a person the consequence of their
+/// click says "this creates a tracked file" before it happens rather than
+/// after.
+pub fn set_completion(root: &Path, behavior: Option<CompletionBehavior>) -> Result<bool> {
+    let created = match behavior {
+        Some(behavior) => {
+            manifest::set_scalar(root, Section::Workspace, "delivery", behavior.abi_name())?
+        }
+        None => {
+            manifest::unset_scalar(root, Section::Workspace, "delivery")?;
+            false
+        }
+    };
     // Re-read through the typed path: a write the schema would reject is a
     // bug here, not on a later command.
     declared(root)?;
@@ -86,6 +181,24 @@ impl<'de> Deserialize<'de> for DeclaredArtifacts {
             )),
         }
     }
+}
+
+/// What the project asks an agent at each state.
+///
+/// Read leniently, unlike the policy beside it: an unknown policy key read
+/// as a default is a policy silently not honoured, and refusing it is
+/// right; an unknown action key makes nothing happen, so it is left out and
+/// named, and the rest of the project still reads. Failing on it would
+/// empty every agent's row over a typo in what a click sends.
+pub fn actions(root: &Path) -> Result<DeclaredActions> {
+    Ok(read(root)?.actions())
+}
+
+/// What is asked at each moment in `root`: see
+/// [`DeclaredActions::with_fallbacks`]. A manifest that cannot be read
+/// leaves the fallbacks, since a paused rebase is no less paused for it.
+pub fn instructions(root: &Path) -> BTreeMap<ActionState, String> {
+    actions(root).unwrap_or_default().with_fallbacks()
 }
 
 /// The artifact places the project declares, if any.
@@ -123,12 +236,40 @@ impl WorkspaceSection {
             return Ok(None);
         };
         let mut policy = section.clone();
-        if policy.remove(ARTIFACTS).is_some() && policy.is_empty() {
+        let places = policy.remove(ARTIFACTS).is_some();
+        let actions = policy.remove(ACTIONS).is_some();
+        if (places || actions) && policy.is_empty() {
             return Ok(None);
         }
         serde_json::from_value(serde_json::Value::Object(policy))
             .map(Some)
             .map_err(|error| malformed(path, format!("workspace: {error}")))
+    }
+
+    fn actions(&self) -> DeclaredActions {
+        let Some(value) = self.0.as_ref().and_then(|section| section.get(ACTIONS)) else {
+            return DeclaredActions::default();
+        };
+        let mut declared = DeclaredActions::default();
+        let Some(entries) = value.as_object() else {
+            declared.ignored.push(format!("`{ACTIONS}` must hold keys"));
+            return declared;
+        };
+        for (key, value) in entries {
+            let Some(state) = ActionState::from_key(key) else {
+                declared.ignored.push(format!("unknown action `{key}`"));
+                continue;
+            };
+            match value.as_str().map(str::trim) {
+                Some(text) if !text.is_empty() => {
+                    declared.instructions.insert(state, text.to_owned());
+                }
+                _ => declared
+                    .ignored
+                    .push(format!("`{key}` is not one line of text")),
+            }
+        }
+        declared
     }
 
     fn artifacts(&self, path: &Path) -> Result<Option<DeclaredArtifacts>> {
@@ -259,8 +400,11 @@ mod tests {
 
     #[test]
     fn a_policy_only_manifest_is_valid() {
-        let manifest = parsed("workspace:\n  delivery: pr\n").unwrap();
-        assert_eq!(manifest.policy.unwrap().completion, CompletionBehavior::Pr);
+        let manifest = parsed("workspace:\n  delivery: push\n").unwrap();
+        assert_eq!(
+            manifest.policy.unwrap().completion,
+            Some(CompletionBehavior::Push)
+        );
         assert!(manifest.marketplaces.is_empty());
     }
 
@@ -311,16 +455,22 @@ mod tests {
     fn declaring_the_policy_creates_the_manifest_and_says_that_it_did() {
         let root = uze_testkit::temp::scratch("manifest-set-completion");
         assert!(
-            set_completion(&root, CompletionBehavior::Pr).unwrap(),
+            set_completion(&root, Some(CompletionBehavior::Push)).unwrap(),
             "the first call creates the file, and the caller is told so"
         );
-        assert_eq!(policy(&root).unwrap().completion, CompletionBehavior::Pr);
+        assert_eq!(
+            policy(&root).unwrap().completion,
+            Some(CompletionBehavior::Push)
+        );
 
         assert!(
-            !set_completion(&root, CompletionBehavior::Merge).unwrap(),
+            !set_completion(&root, Some(CompletionBehavior::Merge)).unwrap(),
             "the second call changes a file that already exists"
         );
-        assert_eq!(policy(&root).unwrap().completion, CompletionBehavior::Merge);
+        assert_eq!(
+            policy(&root).unwrap().completion,
+            Some(CompletionBehavior::Merge)
+        );
     }
 
     #[test]
@@ -330,13 +480,13 @@ mod tests {
         fs::write(manifest_path_for(&root), authored).unwrap();
 
         assert!(
-            !set_completion(&root, CompletionBehavior::Merge).unwrap(),
+            !set_completion(&root, Some(CompletionBehavior::Merge)).unwrap(),
             "a manifest that exists is not created"
         );
         let manifest = load(&root).unwrap().unwrap();
         assert_eq!(
             manifest.policy.unwrap().completion,
-            CompletionBehavior::Merge
+            Some(CompletionBehavior::Merge)
         );
         let written = fs::read_to_string(manifest_path_for(&root)).unwrap();
         assert!(written.contains("# ours"), "{written}");
@@ -349,7 +499,7 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("refuse every checkout"), "{message}");
         assert!(parsed("workspace:\n  slots: 1\n").is_ok());
-        assert!(parsed("workspace:\n  delivery: pr\n").is_ok());
+        assert!(parsed("workspace:\n  delivery: push\n").is_ok());
     }
 
     #[test]
@@ -397,7 +547,7 @@ mod tests {
     #[test]
     fn the_policy_round_trips_with_every_field() {
         let manifest = parsed(
-            "workspace:\n  worktree: always\n  target: develop\n  delivery: pr\n  \
+            "workspace:\n  worktree: always\n  target: develop\n  delivery: push\n  \
              link: [.env, .env.local]\n  setup: pnpm install\n  gate:\n    - cargo test\n    \
              - cargo clippy\n  slots: 3\n",
         )
@@ -405,7 +555,7 @@ mod tests {
         let policy = manifest.policy.unwrap();
         assert_eq!(policy.default, AgentPlacementDefault::Isolated);
         assert_eq!(policy.target.as_deref(), Some("develop"));
-        assert_eq!(policy.completion, CompletionBehavior::Pr);
+        assert_eq!(policy.completion, Some(CompletionBehavior::Push));
         assert_eq!(policy.link.len(), 2);
         assert_eq!(policy.setup, vec!["pnpm install".into()]);
         assert_eq!(
@@ -426,7 +576,7 @@ mod tests {
     #[test]
     fn where_an_agent_starts_is_declared_defaulted_or_refused_by_name() {
         assert_eq!(
-            parsed("workspace:\n  delivery: handoff\n")
+            parsed("workspace:\n  delivery: merge\n")
                 .unwrap()
                 .policy
                 .unwrap()
@@ -456,6 +606,139 @@ mod tests {
         );
     }
 
+    /// `handoff` and `pr` are gone, not aliased: an old spelling is a
+    /// mistake to name, and the refusal says what the section takes now.
+    #[test]
+    fn a_retired_delivery_is_refused_naming_what_is_accepted() {
+        for retired in ["handoff", "pr"] {
+            let reason = parsed(&format!("workspace:\n  delivery: {retired}\n"))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                reason.contains("merge") && reason.contains("push"),
+                "the refusal names both behaviors it would have taken: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_undeclared_delivery_is_no_delivery() {
+        let policy = parsed("workspace:\n  worktree: always\n")
+            .unwrap()
+            .policy
+            .unwrap();
+        assert_eq!(policy.completion, None);
+    }
+
+    #[test]
+    fn taking_a_delivery_back_removes_the_key() {
+        let root = uze_testkit::temp::scratch("manifest-unset-completion");
+        set_completion(&root, Some(CompletionBehavior::Push)).unwrap();
+        assert!(!set_completion(&root, None).unwrap());
+        let written = fs::read_to_string(root.join("agents.yaml")).unwrap();
+        assert!(!written.contains("delivery"), "{written}");
+        assert_eq!(policy(&root).unwrap().completion, None);
+    }
+
+    fn project_declaring(label: &str, workspace: &str) -> PathBuf {
+        let root = uze_testkit::temp::scratch(label);
+        fs::write(root.join("agents.yaml"), format!("workspace:\n{workspace}")).unwrap();
+        root
+    }
+
+    #[test]
+    fn declared_actions_read_by_the_moment_they_answer() {
+        let root = project_declaring(
+            "declared-actions",
+            "  delivery: push\n  actions:\n    on_publish: Open a pull request.\n    \
+             on_fail: \"  Fix the checks.  \"\n",
+        );
+        let declared = actions(&root).unwrap();
+        assert_eq!(
+            declared.instructions,
+            BTreeMap::from([
+                (ActionState::OnPublish, "Open a pull request.".to_owned()),
+                (ActionState::OnFail, "Fix the checks.".to_owned()),
+            ])
+        );
+        assert!(declared.ignored.is_empty(), "{:?}", declared.ignored);
+        assert_eq!(
+            policy(&root).unwrap().completion,
+            Some(CompletionBehavior::Push),
+            "the policy beside them still reads"
+        );
+    }
+
+    #[test]
+    fn an_unknown_state_or_an_empty_instruction_is_left_out_and_named() {
+        let root = project_declaring(
+            "declared-actions-ignored",
+            "  delivery: merge\n  actions:\n    on_redy: typo\n    published: old key\n    \
+             on_conflict: \"\"\n    on_change: Commit your work.\n",
+        );
+        let declared = actions(&root).unwrap();
+        assert_eq!(
+            declared.instructions,
+            BTreeMap::from([(ActionState::OnChange, "Commit your work.".to_owned())])
+        );
+        assert_eq!(declared.ignored.len(), 3, "{:?}", declared.ignored);
+        assert!(
+            declared
+                .ignored
+                .iter()
+                .any(|reason| reason.contains("on_redy")),
+            "names the key: {:?}",
+            declared.ignored
+        );
+        assert!(
+            declared
+                .ignored
+                .iter()
+                .any(|reason| reason.contains("on_conflict")),
+            "{:?}",
+            declared.ignored
+        );
+        assert_eq!(
+            policy(&root).unwrap().completion,
+            Some(CompletionBehavior::Merge),
+            "a bad action key never stops the policy from reading"
+        );
+    }
+
+    #[test]
+    fn actions_alone_declare_no_policy_and_none_declared_is_empty() {
+        let root = project_declaring(
+            "declared-actions-alone",
+            "  actions:\n    on_change: Commit your work.\n",
+        );
+        assert_eq!(declared(&root).unwrap(), None);
+        assert_eq!(actions(&root).unwrap().instructions.len(), 1);
+
+        let root = project_declaring("declared-actions-none", "  delivery: merge\n");
+        assert_eq!(actions(&root).unwrap(), DeclaredActions::default());
+    }
+
+    #[test]
+    fn a_conflict_and_a_failed_gate_are_asked_about_unless_the_project_says_otherwise() {
+        let root = project_declaring(
+            "declared-actions-fallback",
+            "  delivery: push\n  actions:\n    on_fail: Fix the checks.\n",
+        );
+        let instructions = instructions(&root);
+        assert_eq!(
+            instructions.get(&ActionState::OnFail).map(String::as_str),
+            Some("Fix the checks.")
+        );
+        assert_eq!(
+            instructions
+                .get(&ActionState::OnConflict)
+                .map(String::as_str),
+            ActionState::OnConflict.fallback()
+        );
+        assert_eq!(instructions.get(&ActionState::OnPublish), None);
+        assert_eq!(instructions.get(&ActionState::OnChange), None);
+    }
+
     #[test]
     fn an_undeclared_policy_is_the_built_in_default() {
         let directory = std::env::temp_dir().join(format!("uze-manifest-{}", std::process::id()));
@@ -481,13 +764,18 @@ mod tests {
         let root = uze_testkit::temp::scratch("declaration-scaffold-then-choose");
         ensure_exists(&root).unwrap();
         let before = fs::read_to_string(manifest_path_for(&root)).unwrap();
-        assert!(!set_completion(&root, CompletionBehavior::Pr).unwrap());
+        assert!(!set_completion(&root, Some(CompletionBehavior::Push)).unwrap());
         let written = fs::read_to_string(manifest_path_for(&root)).unwrap();
         assert!(written.starts_with(before.trim_end()), "{written}");
-        assert!(written.contains("workspace:\n  delivery: pr"), "{written}");
+        assert!(
+            written.contains("workspace:\n  delivery: push"),
+            "{written}"
+        );
         assert_eq!(
-            declared(&root).unwrap().map(|policy| policy.completion),
-            Some(CompletionBehavior::Pr)
+            declared(&root)
+                .unwrap()
+                .and_then(|policy| policy.completion),
+            Some(CompletionBehavior::Push)
         );
     }
 
@@ -542,7 +830,7 @@ mod tests {
             default: AgentPlacementDefault::Isolated,
             branch: crate::worktree::BranchVocabulary::Unset,
             target: Some("main".to_owned()),
-            completion: CompletionBehavior::Handoff,
+            completion: Some(CompletionBehavior::Merge),
             link: vec![PathBuf::from(".env")],
             setup: vec!["pnpm install".into()],
             gate: vec!["pnpm test".into()],
@@ -554,7 +842,15 @@ mod tests {
             "/../../web/content/docs/reference/project-files.mdx"
         ))
         .unwrap();
-        let keys = [declared_keys(&policy), vec![ARTIFACTS.to_owned()]].concat();
+        let keys = [
+            declared_keys(&policy),
+            vec![ARTIFACTS.to_owned(), ACTIONS.to_owned()],
+            ActionState::ALL
+                .iter()
+                .map(|state| state.key().to_owned())
+                .collect(),
+        ]
+        .concat();
         assert!(keys.len() > 5, "the shapes emitted nothing to check");
         for key in keys {
             assert!(

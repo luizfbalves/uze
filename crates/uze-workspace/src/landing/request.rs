@@ -83,14 +83,22 @@ pub struct RequestObservation {
     pub(super) request: Option<u32>,
 }
 
+impl RequestObservation {
+    /// Whether answering this took a question to the remote, rather than
+    /// the local refs and the clock alone.
+    pub fn asked_the_remote(&self) -> bool {
+        self.asked_at_unix.is_some()
+    }
+}
+
 /// Asks the remote whether a request is open for this task's published
 /// branch, writing nothing.
 ///
 /// Called on the evaluation pass rather than only from [`publish`],
-/// because the request is not always UZE's doing: an agent told to push
-/// and open the request itself leaves a forge that UZE would otherwise
-/// never learn about, and the button would go on offering to publish a
-/// branch that already has a request open. Gated three ways so the round
+/// because the request is never UZE's doing: whoever opens it, UZE learns
+/// about it only from the forge, and published work would go on reading
+/// as published, not in review, for the whole life of the request. Gated
+/// three ways so the round
 /// trip stays rare — a published branch, no number yet, and at most one
 /// question per [`REQUEST_INTERVAL`] — and it stops for good the moment
 /// it is answered.
@@ -129,6 +137,23 @@ pub fn observe_request(primary: &Path, isolation: &Isolation) -> RequestObservat
         asked_at_unix: Some(now),
         request: discover_request(primary, &published.tip),
     }
+}
+
+/// Whether [`observe_request`] has anything to do for this task, read from
+/// `tips` and the record alone: a number for a branch the remote no longer
+/// publishes (to forget), or a published branch with no number yet, not
+/// asked about within [`REQUEST_INTERVAL`]. A pass asks only these, so a
+/// task whose request is known, or that is not on the remote, costs it no
+/// process and no write.
+pub fn request_due(tips: &checkout::BranchTips, isolation: &Isolation) -> bool {
+    let branch = publication_among(tips, isolation).map(|found| found.branch);
+    if isolation.published_request.is_some() {
+        return isolation.request_branch != branch;
+    }
+    branch.is_some()
+        && !isolation.request_asked_at_unix.is_some_and(|asked| {
+            crate::task::now_unix().saturating_sub(asked) < REQUEST_INTERVAL.as_secs()
+        })
 }
 
 /// Writes down what [`observe_request`] learned. The caller holds the

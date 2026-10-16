@@ -652,20 +652,20 @@ pub(super) fn deliver_selected_tab(
         model.raise_toast(
             ToastKind::Told,
             "no task on this tab",
-            "nothing here has work to deliver",
+            "nothing here to deliver",
             None,
         );
         return;
     };
-    // Only what UZE cut. The button is not drawn for an agent in the
-    // project's own root, but the key still reaches here — and a key that
+    // Only what UZE cut. An agent in the project's own root has no status
+    // in the strip, but the key still reaches here — and a key that
     // silently did nothing, or handed the operator a `NotReady` from deep
     // in delivery, is worse than one that says whose branch it is.
     if !task.isolated {
         model.raise_toast(
             ToastKind::Told,
-            "this branch is yours, not UZE's",
-            "move the agent to a worktree to have UZE deliver its work",
+            "your branch, not UZE's",
+            "move the agent to a worktree",
             None,
         );
         return;
@@ -686,10 +686,10 @@ pub(super) fn deliver_selected_tab(
         return;
     }
     // No message: the press is already answered where the state lives.
-    // `delivery_pending` is what `drawn_state` reads, so the button under
-    // the pointer becomes "delivering" and the task's sidebar mark with
-    // it — and a notice saying the same word beside a button already
-    // saying it is the header reporting one fact twice.
+    // `delivery_pending` is what `drawn_state` reads, so the status in the
+    // strip becomes "delivering" and the task's sidebar mark with it — and
+    // a notice saying the same word beside a status already saying it is
+    // the header reporting one fact twice.
     spawn_delivery(home, cwd, Some(task.id), sender.clone());
 }
 

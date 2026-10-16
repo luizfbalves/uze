@@ -15,7 +15,15 @@ impl WorkspaceModel {
             return;
         }
         let occupied: Vec<PathBuf> = self.remembered.occupied_checkouts.iter().cloned().collect();
-        spawn_task_evaluation(home, key, cwd, occupied, sender.clone());
+        self.remembered.evaluation_generation += 1;
+        spawn_task_evaluation(
+            home,
+            key,
+            self.remembered.evaluation_generation,
+            cwd,
+            occupied,
+            sender.clone(),
+        );
     }
 
     /// The working directory the badge and the timeline are about: the
@@ -334,7 +342,13 @@ impl WorkspaceModel {
         self.raise_toast(
             ToastKind::Failed,
             title,
-            format!("{}: {message}", path.display()),
+            format!(
+                "{}: {message}",
+                path.file_name().map_or_else(
+                    || path.display().to_string(),
+                    |name| { name.to_string_lossy().into_owned() }
+                )
+            ),
             None,
         );
         true

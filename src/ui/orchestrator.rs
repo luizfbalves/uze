@@ -34,8 +34,8 @@ use std::{
 use uze_application::AgentIdentity;
 use uze_application::path::Canonical as _;
 use uze_application::{
-    AgentView, CompletionBehavior, DeliveryOutcome, DeliveryReport, Evaluation, TargetSyncReport,
-    UpstreamSync, WorkStateView,
+    AgentView, DeliveryOutcome, DeliveryReport, Evaluation, TargetSyncReport, UpstreamSync,
+    WorkStateView,
 };
 use uze_application::{Result, UzeError, UzeHome};
 use uze_extensions::{
@@ -65,6 +65,7 @@ pub(super) use reads::*;
 
 mod activity;
 mod agents;
+use agents::StatusAnswer;
 mod answers;
 mod approval;
 mod events;
@@ -236,6 +237,12 @@ pub(crate) enum WorkspaceExit {
 /// integrated by hand, a checkout removed.
 const TASK_REFRESH: Duration = Duration::from_secs(20);
 
+/// How often each checkout on screen is asked whether Git recorded
+/// anything in it. A handful of `stat`s per checkout and no process, so a
+/// commit an agent makes mid-turn is drawn within about this long rather
+/// than on the next [`TASK_REFRESH`].
+const CHECKOUT_WATCH: Duration = Duration::from_secs(1);
+
 /// How often each visible project's target is brought in line with its
 /// remote, and therefore how far behind the team a new agent can start.
 /// A network round trip, so far less often than [`TASK_REFRESH`]; a
@@ -328,26 +335,20 @@ fn describe_delivery(report: &DeliveryReport) -> String {
 
 fn describe_delivery_outcome(report: &DeliveryReport) -> String {
     match &report.outcome {
-        DeliveryOutcome::Handoff => format!("ready on {}", report.task.branch),
         DeliveryOutcome::Merged => format!(
             "merged {} {}",
             theme::glyph(Symbol::ArrowTo),
             report.task.target
         ),
-        DeliveryOutcome::Published { request, .. } => {
-            format!("synced {} #{request}", theme::glyph(Symbol::ArrowTo))
-        }
-        // The one line with room for the whole word, and the one place
-        // there is no number to say it instead: the forge's own word
-        // where `origin` said which forge this is, and the neutral one
-        // where it did not — which is the word the agent was handed too.
-        DeliveryOutcome::AwaitingRequest(_) => format!(
-            "pushed · agent opening the {}",
-            report.task.forge.request_term().unwrap_or("request")
-        ),
+        DeliveryOutcome::Published {
+            request: Some(request),
+            ..
+        } => format!("synced {} #{request}", theme::glyph(Symbol::ArrowTo)),
+        DeliveryOutcome::Published { request: None, .. } => "published".to_owned(),
         DeliveryOutcome::Refused(reason) => reason.clone(),
-        DeliveryOutcome::AwaitingApproval(_) => "the gate waits for your approval".to_owned(),
-        DeliveryOutcome::ReturnedToAgent(_) => "back to its agent".to_owned(),
+        DeliveryOutcome::AwaitingApproval(_) => "gate awaits approval".to_owned(),
+        DeliveryOutcome::Conflicted { .. } => "conflict".to_owned(),
+        DeliveryOutcome::Failed { .. } => "checks failed".to_owned(),
     }
 }
 
@@ -559,7 +560,7 @@ pub(crate) fn attach_workspace(
     if let Some(replaced) = replaced {
         model.raise_toast(
             ToastKind::Told,
-            "terminal runtime replaced",
+            "runtime replaced",
             replaced_detail(replaced),
             None,
         );
@@ -845,6 +846,10 @@ pub(super) enum WorkspaceHit {
     /// — same pattern [`WorkspaceHit::PickAgent`] uses for the agent
     /// picker.
     PickSpaceRoot(usize),
+    /// The tab strip's count of what the focused checkout's upstream has
+    /// that it lacks: pulls the target, by fast-forward only. Drawn only
+    /// on the target, where the count is.
+    PullTarget,
     /// The tab strip's right-corner button — opens the Git extension's
     /// changes of the active tab's checkout — the code surface
     /// (`WorkspaceModel::code`), opened on its diff.
@@ -873,10 +878,14 @@ pub(super) enum WorkspaceHit {
     /// every glyph in both columns means, anchored to the mark. A status
     /// column is a wordless vocabulary; this is where it is written down.
     OpenStatusCatalog(Rect),
-    /// The tab strip's delivery button — delivers the selected tab's task
-    /// the way the project's completion says. Present only when the task
-    /// is deliverable.
-    Deliver(TabId),
+    /// The tab strip's work-state status when a click answers it (see
+    /// `WorkspaceModel::status_answer`): delivers ready work, or sends the
+    /// instruction declared for the state to the selected tab's agent.
+    StatusAction(TabId),
+    /// The same status when nothing answers it. A click does nothing; it
+    /// is a target only so the pointer resting on it is told what the
+    /// state means.
+    StatusReport(TabId),
     /// A hit the open extension's own render pass produced (a file row, a
     /// worktree header, its tree/diff resize handle, its close button —
     /// see `uze_extensions::ExtensionHit`), wrapped instead of given its
@@ -1398,6 +1407,11 @@ struct Channels {
     policy_regions: Answers<PolicyRegionResolution>,
     /// Bringing each project's target in line with its remote.
     target_syncs: Answers<TargetSyncReport>,
+    /// Pulling the target the operator asked for.
+    pulls: Answers<PullResolution>,
+    /// What each checkout on screen last recorded, polled on
+    /// [`CHECKOUT_WATCH`].
+    checkout_stamps: Answers<StampResolution>,
     /// A project's gates this machine cannot run, read where it opens.
     unspelled_gates: Answers<UnspelledGates>,
     /// A project's commands that wait for the operator's approval, read
@@ -1489,6 +1503,9 @@ struct Remembered {
     /// Every repository's tasks as last evaluated, keyed by its primary
     /// checkout. Display state: the truth is Git and the task store.
     tasks: BTreeMap<PathBuf, Vec<AgentView>>,
+    /// What each project's `workspace.actions` left out, as last said, so
+    /// an unchanged set is not said again on every evaluation.
+    ignored_actions: BTreeMap<PathBuf, Vec<String>>,
     /// The branch checked out at each evaluation key (see
     /// [`evaluation_key`]) — the primary's for every slot of a repository,
     /// a directory's own outside any slot. Read for an agent outside any
@@ -1525,6 +1542,18 @@ struct Remembered {
     task_name_adoptions: BTreeMap<TabId, String>,
     last_task_refresh: Option<Instant>,
     last_target_sync: Option<Instant>,
+    /// Each checkout's [`StampResolution`] as last read, and when the next
+    /// read was asked for; a checkout whose stamp moves is evaluated.
+    checkout_stamps: BTreeMap<PathBuf, u64>,
+    last_checkout_watch: Option<Instant>,
+    checkout_watch_pending: bool,
+    /// A pull the operator asked for is running.
+    pull_pending: bool,
+    /// The count [`WorkspaceModel::schedule_evaluation`] numbers each
+    /// evaluation with, and the newest absorbed per key: an evaluation's
+    /// remote half is applied only when no later one has been.
+    evaluation_generation: u64,
+    absorbed_generation: BTreeMap<PathBuf, u64>,
     /// Projects whose target sync last said new agents start behind, so
     /// it is said once rather than on every pass.
     target_sync_behind: BTreeSet<PathBuf>,
@@ -2018,6 +2047,36 @@ impl PromptBuffer {
     }
 }
 
+/// Whether a pane may take a submission of UZE's now, and why not when it
+/// may not.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Submission {
+    Ok,
+    /// The agent is mid-turn.
+    Busy,
+    /// The operator has text in the agent's input, unsent.
+    Typed,
+    /// Something was typed this client cannot reconstruct — a history
+    /// recall, a chord — so what is on the line is unknown until the
+    /// operator's next Enter or Ctrl-C.
+    Unknown,
+}
+
+impl Submission {
+    /// The toast a refusal says, as its title and detail.
+    fn refusal(self, label: &str) -> Option<(&'static str, String)> {
+        match self {
+            Self::Ok => None,
+            Self::Busy => Some(("agent is busy", label.to_owned())),
+            Self::Typed => Some(("you have text typed", label.to_owned())),
+            Self::Unknown => Some((
+                "can't tell what's typed",
+                "press enter or ctrl-c".to_owned(),
+            )),
+        }
+    }
+}
+
 struct GitBadge {
     cwd: PathBuf,
     summary: Option<code::ChangeSummary>,
@@ -2378,9 +2437,9 @@ fn runtime_error(error: uze_terminal::RuntimeError) -> UzeError {
 /// every agent in them was relaunched rather than kept.
 fn replaced_detail(replaced: Replaced) -> &'static str {
     match replaced {
-        Replaced::AnotherProtocol => "another release's server ended; agents restarted",
-        Replaced::Unreachable => "an unreachable server ended; agents restarted",
-        Replaced::Orphaned => "a server of a deleted workspace ended",
+        Replaced::AnotherProtocol => "older release; agents restarted",
+        Replaced::Unreachable => "it stopped; agents restarted",
+        Replaced::Orphaned => "its workspace was deleted",
     }
 }
 

@@ -4,11 +4,27 @@ use super::*;
 
 impl Workspace<'_> {
     /// Re-reads every live task's state from its checkout — what the
-    /// sidebar shows after an agent's pane goes quiet — and lets a clean,
-    /// live task follow a target that moved. A conflict that produces
-    /// returns to the owning agent as a notice for its pane.
+    /// sidebar shows after an agent's pane goes quiet — lets a clean, live
+    /// task follow a target that moved, and asks the remote about the
+    /// requests that are due: [`Self::read_tasks`] and
+    /// [`Self::ask_about_requests`] in one call, for a caller with nobody
+    /// waiting on the first half.
     #[tracing::instrument(name = "workspace.evaluate_tasks", skip_all, fields(cwd = %cwd.display()))]
     pub fn evaluate_tasks(&self, cwd: &Path, occupied: &[PathBuf]) -> Evaluation {
+        let mut evaluation = self.read_tasks(cwd, occupied);
+        if let Some(tasks) = self.ask_about_requests(&evaluation.requests) {
+            evaluation.tasks = tasks;
+        }
+        evaluation
+    }
+
+    /// The pass without the network: every state read from the checkouts
+    /// and the record, and the question for the remote carried in
+    /// [`Evaluation::requests`] rather than asked. A `git ls-remote` takes
+    /// seconds over SSH, and a state the disk already knows was drawn only
+    /// once the forge had answered about something else.
+    #[tracing::instrument(name = "workspace.read_tasks", skip_all, fields(cwd = %cwd.display()))]
+    pub fn read_tasks(&self, cwd: &Path, occupied: &[PathBuf]) -> Evaluation {
         let (primary, policy) = match self.repository_context(cwd) {
             Ok(Some(context)) => context,
             Ok(None) => return Evaluation::default(),
@@ -22,7 +38,10 @@ impl Workspace<'_> {
             }
         };
         let target = target_of(&primary, &policy);
-        let mut notices = Vec::new();
+        let declared = declaration::actions(&primary).unwrap_or_default();
+        let instructions = declared.with_fallbacks();
+        let ignored_actions = declared.ignored;
+        let mut arrived = Vec::new();
         let mut ask_the_remote: Vec<(AgentId, Isolation)> = Vec::new();
         let completion = policy.completion;
         let evaluated = task::locked_reporting(&self.0.home, &primary, |store| {
@@ -43,7 +62,6 @@ impl Workspace<'_> {
                     .filter_map(|agent| agent.parent.clone())
                     .collect(),
                 vocabulary: &policy.branch,
-                completion,
             };
             // Every agent, not only the isolated ones: where the work
             // stands is a fact about the checkout an agent sits in, and
@@ -58,7 +76,7 @@ impl Workspace<'_> {
                 let was = (agent.state.clone(), agent.label.clone());
                 if let Some(read) = pass.evaluate(agent) {
                     ask_the_remote.extend(read.ask_the_remote);
-                    notices.extend(read.notice);
+                    arrived.extend(read.arrived);
                 }
                 if was != (agent.state.clone(), agent.label.clone()) {
                     tracing::info!(
@@ -85,27 +103,50 @@ impl Workspace<'_> {
                 };
             }
         };
-        let recorded = self
-            .adopt_observed_requests(&primary, &ask_the_remote)
-            .unwrap_or(recorded);
         Evaluation {
-            tasks: task_views(&primary, &recorded, completion, &target),
-            notices,
+            tasks: task_views(&primary, &recorded, completion, &instructions, &target),
+            arrived,
+            ignored_actions,
             unreadable: None,
             recovered: recovery.set_aside.map(|set_aside| {
-                format!(
-                    "the agents recorded here could not be read — set aside at {}",
-                    set_aside.path.display()
-                )
+                let kept = set_aside.path.file_name().map_or_else(
+                    || set_aside.path.display().to_string(),
+                    |name| name.to_string_lossy().into_owned(),
+                );
+                format!("unreadable record kept as {kept}")
             }),
+            requests: RequestQuestion {
+                asked: ask_the_remote,
+                primary,
+                completion,
+                instructions,
+                target,
+            },
         }
+    }
+
+    /// Asks the remote the question a [`Self::read_tasks`] pass left, and
+    /// answers with every task's view as recorded after it — `None` when
+    /// the remote was not asked at all (each task was asked within the
+    /// minute, or already has its number), so the views that pass gave
+    /// still stand.
+    #[tracing::instrument(name = "workspace.ask_about_requests", skip_all)]
+    pub fn ask_about_requests(&self, question: &RequestQuestion) -> Option<Vec<AgentView>> {
+        let recorded = self.adopt_observed_requests(&question.primary, &question.asked)?;
+        Some(task_views(
+            &question.primary,
+            &recorded,
+            question.completion,
+            &question.instructions,
+            &question.target,
+        ))
     }
 
     /// Asks the remote about each task's request with the document
     /// unlocked, then takes the lock once to write the answers down,
     /// answering with the records as written so a request discovered here
-    /// is in the views this pass gives rather than in the next one's.
-    /// `None` when nothing was asked or nothing could be written.
+    /// is in the views at once rather than in the next pass's. `None` when
+    /// the remote was not asked, or nothing could be written.
     pub(super) fn adopt_observed_requests(
         &self,
         primary: &Path,
@@ -118,6 +159,9 @@ impl Workspace<'_> {
         if observed.is_empty() {
             return None;
         }
+        let asked_the_remote = observed
+            .iter()
+            .any(|(_, observation)| observation.asked_the_remote());
         let adopted = task::locked(&self.0.home, primary, |store| {
             for ((id, asked), observation) in &observed {
                 // Only onto the record the question was asked about.
@@ -137,11 +181,13 @@ impl Workspace<'_> {
             Ok(store.clone())
         });
         match adopted {
-            Ok(recorded) => Some(recorded),
+            // Written either way — a number for a branch the remote no
+            // longer has is dropped without asking it — but only a
+            // question the remote answered is news the pass's views lack.
+            Ok(recorded) => asked_the_remote.then_some(recorded),
             // The pass itself stands — its states were written, and the
             // views already say them. What is lost is a request number the
-            // next pass asks for again, which is not worth a notice in an
-            // agent's pane, the only channel an evaluation has.
+            // next pass asks for again.
             Err(error) => {
                 tracing::warn!(%error, "the remote's answer about open requests was not recorded");
                 None
@@ -151,11 +197,12 @@ impl Workspace<'_> {
 }
 
 /// What reading one task from its checkout came to: the task as the remote
-/// is to be asked about it, where completion opens a request, and the
-/// conflict its agent is told about when following the target produced one.
+/// is to be asked about it, when the remote has something to say, and the
+/// agent, when following the target moved it into a conflict.
 pub(super) struct Read {
     pub(super) ask_the_remote: Option<(AgentId, Isolation)>,
-    pub(super) notice: Option<AgentNotice>,
+    /// The agent, when this pass's own rebase moved it into a conflict.
+    pub(super) arrived: Option<String>,
 }
 
 /// What every task of one evaluation pass is read against.
@@ -180,7 +227,6 @@ pub(super) struct EvaluationPass<'a> {
     /// children is unfinished for their work, however level its own branch is.
     pub(super) holding_children: BTreeSet<AgentId>,
     pub(super) vocabulary: &'a BranchVocabulary,
-    pub(super) completion: CompletionBehavior,
 }
 
 impl EvaluationPass<'_> {
@@ -280,46 +326,37 @@ impl EvaluationPass<'_> {
             return None;
         }
         self.read_readiness(state, task, ended_owner);
-        // The other half of what a delivery would do, learned the same way
-        // readiness is: an agent told to push and open the request itself
-        // is the one case UZE's own records can never cover, and until this
-        // ran the button went on offering to publish a branch the forge
-        // already had a request open for. Only where a request is what
-        // completion means — a project that merges or hands off never asks
-        // the remote anything.
+        // The request, learned the same way readiness is: whoever pushed
+        // the branch and opened a request for it, UZE's own records never
+        // cover it, and a published branch reads as in review only once
+        // the forge says it is. Whatever the project's delivery: a push is
+        // a push. Only a task the remote has something to say about is
+        // carried to it (`request_due`).
         //
         // Asked after the pass, with the document unlocked: it is a `git
         // ls-remote` per task, and inside the lock one slow remote made
         // every delivery and every placement in the project wait behind the
         // whole pass.
         let ask_the_remote =
-            (self.completion == CompletionBehavior::Pr).then(|| (id.clone(), task.clone()));
+            landing::request_due(&self.refs.tips, task).then(|| (id.clone(), task.clone()));
         // Following a moved target costs a clean task nothing and a dirty
         // one its work in progress, which `refresh` refuses. Whatever the
         // completion behaviour: a task that follows the target as it moves
         // meets a conflict while its agent is still holding the change,
         // rather than in a request already opened.
-        let notice = if matches!(*state, WorkState::Running | WorkState::Ready)
-            && let Err(DeliveryFailure::Conflict {
-                files,
-                target_moved,
-            }) = landing::refresh(primary, state, task)
-            && let Some(slot) = slot
-        {
-            Some(AgentNotice {
-                task: id.as_str().to_owned(),
-                checkout: slot,
-                message: landing::conflict_message(task, &files, target_moved),
-            })
-        } else {
-            None
-        };
+        let arrived = (matches!(*state, WorkState::Running | WorkState::Ready)
+            && slot.is_some()
+            && matches!(
+                landing::refresh(primary, state, task),
+                Err(DeliveryFailure::Conflict { .. })
+            ))
+        .then(|| id.as_str().to_owned());
         // The automatic half of naming is the agent's label as much as its
         // branch, so it runs with the isolation's borrow released.
         self.name_from_the_work(agent);
         Some(Read {
             ask_the_remote,
-            notice,
+            arrived,
         })
     }
 
@@ -383,7 +420,13 @@ impl EvaluationPass<'_> {
             && !agent.is_named()
             && let Some(derived) = landing::derived_name(primary, isolation, self.vocabulary)
             && !checkout::name_is_taken(primary, &derived)
-            && checkout::rename_branch(primary, &isolation.branch.clone(), &derived).is_ok()
+            && checkout::rename_branch_within(
+                primary,
+                &isolation.branch.clone(),
+                &derived,
+                std::time::Duration::ZERO,
+            )
+            .is_ok()
         {
             // A label the operator typed is a name somebody chose, and the
             // branch being named after the commit does not take it away.

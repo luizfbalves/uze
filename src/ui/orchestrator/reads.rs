@@ -336,9 +336,17 @@ pub(super) struct WorkResolution {
     /// directory reserved for the life of the session and its status
     /// frozen at whatever it last read.
     pub(super) key: PathBuf,
+    /// Which evaluation of this key answered, counted by the scheduler: a
+    /// remote half older than an evaluation already absorbed is dropped.
+    pub(super) generation: u64,
     /// What the directory's repository holds, or `None` when the
     /// directory turned out not to be a Git working tree.
     pub(super) answered: Option<EvaluationAnswer>,
+    /// The remote's half of a pass whose own answer already arrived: the
+    /// repository's views after the forge was asked about requests, and
+    /// nothing else — the branch, target and sync are the first half's to
+    /// say. It releases no reservation, since the first half already did.
+    pub(super) remote: Option<(PathBuf, Vec<AgentView>)>,
 }
 
 /// One evaluated directory: the repository its tasks hang off, the branch
@@ -410,6 +418,7 @@ pub(super) fn spawn_preserved_sweep(home: &UzeHome, sender: mpsc::Sender<Preserv
 pub(super) fn spawn_task_evaluation(
     home: &UzeHome,
     key: PathBuf,
+    generation: u64,
     cwd: PathBuf,
     occupied: Vec<PathBuf>,
     sender: mpsc::Sender<WorkResolution>,
@@ -423,7 +432,7 @@ pub(super) fn spawn_task_evaluation(
         // key, and the directory is then never evaluated again.
         let answered = answered_or(
             || {
-                tui_application(home).ok().and_then(|app| {
+                tui_application(home.clone()).ok().and_then(|app| {
                     let workspace = app.workspace();
                     // Every question here is about the *repository*, and `cwd`
                     // is only how the caller named it. A slot removed from
@@ -441,14 +450,111 @@ pub(super) fn spawn_task_evaluation(
                             .delivery_policy(&key)
                             .and_then(|policy| policy.target),
                         sync: workspace.target_upstream_sync(&key),
-                        evaluation: workspace.evaluate_tasks(&primary, &occupied),
+                        evaluation: workspace.read_tasks(&primary, &occupied),
                         primary,
                     })
                 })
             },
             None,
         );
-        let _ = sender.send(WorkResolution { key, answered });
+        // The states first, the remote after: a `git ls-remote` takes
+        // seconds, and what the checkouts already say is not made to wait
+        // for an answer about a request.
+        let question = answered
+            .as_ref()
+            .map(|answer| (answer.primary.clone(), answer.evaluation.requests.clone()));
+        let _ = sender.send(WorkResolution {
+            key: key.clone(),
+            generation,
+            answered,
+            remote: None,
+        });
+        let Some((primary, question)) = question else {
+            return;
+        };
+        let asked = answered_or(
+            || {
+                tui_application(home)
+                    .ok()
+                    .and_then(|app| app.workspace().ask_about_requests(&question))
+            },
+            None,
+        );
+        if let Some(tasks) = asked {
+            let _ = sender.send(WorkResolution {
+                key,
+                generation,
+                answered: None,
+                remote: Some((primary, tasks)),
+            });
+        }
+    });
+}
+
+/// What a pull the operator asked for did, and where.
+pub(super) struct PullResolution {
+    pub(super) cwd: PathBuf,
+    pub(super) report: Option<uze_application::PullReport>,
+}
+
+/// Pulls the target into the checkout `cwd` belongs to: a fetch and a
+/// fast-forward, seconds of network that no frame may wait on.
+pub(super) fn spawn_pull(home: &UzeHome, cwd: PathBuf, sender: mpsc::Sender<PullResolution>) {
+    let home = home.clone();
+    let parent = tracing::Span::current();
+    thread::spawn(move || {
+        let _pass = crate::telemetry::background_pass!("tui.pull", parent: &parent);
+        // Answers even when it could not ask: the pending flag is released
+        // on arrival, and a silent thread would leave the count unclickable.
+        let report = answered_or(
+            || {
+                tui_application(home)
+                    .ok()
+                    .and_then(|app| app.workspace().pull_target(&cwd))
+            },
+            None,
+        );
+        let _ = sender.send(PullResolution { cwd, report });
+    });
+}
+
+/// What each checkout's stamp read, `None` for one that is no longer a
+/// working tree.
+pub(super) struct StampResolution {
+    pub(super) stamps: Vec<(PathBuf, Option<u64>)>,
+}
+
+/// Reads the change stamp of every checkout on screen. Off the render
+/// path like every other read, cheap as it is: a directory on a slow mount
+/// still answers a `stat` at its own pace. Without a `background_pass!`:
+/// it runs every second, and a span each time would be most of the
+/// journal.
+pub(super) fn spawn_checkout_watch(
+    home: &UzeHome,
+    checkouts: Vec<(PathBuf, Option<String>)>,
+    sender: mpsc::Sender<StampResolution>,
+) {
+    let home = home.clone();
+    thread::spawn(move || {
+        let stamps = answered_or(
+            || {
+                tui_application(home)
+                    .map(|app| {
+                        let workspace = app.workspace();
+                        checkouts
+                            .into_iter()
+                            .map(|(checkout, published)| {
+                                let stamp =
+                                    workspace.checkout_stamp(&checkout, published.as_deref());
+                                (checkout, stamp)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            },
+            Vec::new(),
+        );
+        let _ = sender.send(StampResolution { stamps });
     });
 }
 

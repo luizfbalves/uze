@@ -38,8 +38,8 @@ impl Workspace<'_> {
             &RootStanding::default(),
             store.agent(id)?,
             policy.completion,
+            &declaration::instructions(primary),
             &target,
-            landing::forge(primary),
         ))
     }
 
@@ -75,6 +75,7 @@ impl Workspace<'_> {
         let policy = self.policy(&primary).map_err(|error| error.to_string())?;
         let store = task::load(&self.0.home, &primary).map_err(|error| error.to_string())?;
         Ok(Some(Repository {
+            instructions: declaration::instructions(&primary),
             primary,
             policy,
             store,
@@ -113,6 +114,18 @@ impl Workspace<'_> {
             pull: divergence.behind,
             push: divergence.ahead,
         })
+    }
+
+    /// A number that changes when Git records something in `checkout` —
+    /// a commit, an add, a rebase, a push of its branch or of `published`,
+    /// the name its work went to the remote under — read from the file
+    /// system alone, so a client can poll it cheaply and evaluate only
+    /// when it moved. `None` outside a working tree. At `trace`: it is asked every
+    /// second for every checkout on screen, and a span each time would be
+    /// most of the journal.
+    #[tracing::instrument(name = "workspace.checkout_stamp", level = "trace", skip_all, fields(checkout = %checkout.display()))]
+    pub fn checkout_stamp(&self, checkout: &Path, published: Option<&str>) -> Option<u64> {
+        checkout::change_stamp(checkout, published)
     }
 
     /// Every piece of work on this machine that no live agent is in front
@@ -180,7 +193,8 @@ impl Workspace<'_> {
     }
 
     /// Declares the completion behavior for the repository `cwd` belongs
-    /// to, creating `agents.yaml` when the project has none. Reports
+    /// to, or takes it back with `None`, creating `agents.yaml` when the
+    /// project has none. Reports
     /// whether it created it, so the caller can say which of the two
     /// things just happened.
     ///
@@ -188,7 +202,7 @@ impl Workspace<'_> {
     /// declaring one of its own would be a per-worktree policy, which
     /// there is deliberately none of.
     #[tracing::instrument(name = "workspace.set_completion", skip_all, fields(cwd = %cwd.display()), err)]
-    pub fn set_completion(&self, cwd: &Path, behavior: CompletionBehavior) -> Result<bool> {
+    pub fn set_completion(&self, cwd: &Path, behavior: Option<CompletionBehavior>) -> Result<bool> {
         // `MissingPath` is what resolving a project root already answers
         // with when there is nothing to resolve; a policy is a repository's,
         // and outside one there is no primary checkout to declare it in.
@@ -203,7 +217,10 @@ impl Workspace<'_> {
     pub fn delivery_policy(&self, cwd: &Path) -> Option<DeliveryPolicyView> {
         let repository = self.repository(cwd)?;
         Some(DeliveryPolicyView {
-            completion: repository.policy.completion.abi_name(),
+            completion: repository
+                .policy
+                .completion
+                .map(CompletionBehavior::abi_name),
             target: declared_target(&repository.primary, &repository.policy),
             gate: repository
                 .policy

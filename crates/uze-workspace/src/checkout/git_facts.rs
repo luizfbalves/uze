@@ -9,7 +9,21 @@ use super::*;
 /// Git moves the ref and every checkout on it follows, so the agent's own
 /// working directory needs nothing done to it.
 pub fn rename_branch(primary: &Path, from: &str, to: &str) -> crate::Result<()> {
-    uze_git::locked(primary, uze_git::DEFAULT_WRITE_TIMEOUT, || {
+    rename_branch_within(primary, from, to, uze_git::DEFAULT_WRITE_TIMEOUT)
+}
+
+/// [`rename_branch`], waiting at most `wait` for the write lock. An
+/// evaluation pass names work with `Duration::ZERO`: it holds the tasks
+/// document, which a delivery holding the lock through a slow `pre-push`
+/// needs to record its outcome, and a name not taken now is taken on the
+/// next pass.
+pub fn rename_branch_within(
+    primary: &Path,
+    from: &str,
+    to: &str,
+    wait: Duration,
+) -> crate::Result<()> {
+    uze_git::locked(primary, wait, || {
         git(primary, &["branch", "--move", "--", from, to])
             .map(|_| ())
             .map_err(|reason| crate::UzeError::TaskNaming(reason.to_string()))
@@ -229,4 +243,51 @@ pub(crate) fn commits_ahead_checked(root: &Path, target: &str, branch: &str) -> 
 /// be destroyed asks [`commits_ahead_checked`].
 pub fn commits_ahead(root: &Path, target: &str, branch: &str) -> usize {
     commits_ahead_checked(root, target, branch).unwrap_or(0)
+}
+
+/// A number that changes whenever Git writes what a checkout's state is
+/// read from: its `HEAD`, its index, a paused rebase, and the refs of the
+/// branch it is on and of `published`, the name its work went to the
+/// remote under, local and on `origin`. Read from the file system alone
+/// — no process, no lock — so a client can ask it every second for every
+/// checkout it shows, and read Git only when it moved. `None` when
+/// `checkout` is not a Git working tree.
+///
+/// What it does not see is an edit Git has not been told about (a file
+/// written and not added, which is the pane's own activity to say), and
+/// a ref in a reftable repository, which keeps no file per ref: there the
+/// stamp still moves with `HEAD` and the index, and the refresh clock
+/// covers the rest.
+pub fn change_stamp(checkout: &Path, published: Option<&str>) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+
+    let dot_git = checkout.join(".git");
+    let git_dir = anchor::names(&dot_git)
+        .or_else(|| fs::metadata(&dot_git).ok()?.is_dir().then_some(dot_git))?;
+    let common = fs::read_to_string(git_dir.join("commondir"))
+        .ok()
+        .map(|written| anchor::resolve(&git_dir, written.trim()))
+        .unwrap_or_else(|| git_dir.clone());
+    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let mut watched = vec![
+        git_dir.join("HEAD"),
+        git_dir.join("index"),
+        git_dir.join("rebase-merge"),
+        git_dir.join("rebase-apply"),
+        common.join("packed-refs"),
+    ];
+    let branch = head.trim().strip_prefix("ref: refs/heads/");
+    for name in branch.into_iter().chain(published) {
+        watched.push(common.join("refs/heads").join(name));
+        watched.push(common.join("refs/remotes/origin").join(name));
+    }
+    let mut hasher = std::hash::DefaultHasher::new();
+    head.hash(&mut hasher);
+    for path in watched {
+        fs::metadata(&path)
+            .ok()
+            .map(|meta| (meta.modified().ok(), meta.len()))
+            .hash(&mut hasher);
+    }
+    Some(hasher.finish())
 }

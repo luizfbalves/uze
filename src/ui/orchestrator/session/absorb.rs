@@ -15,12 +15,78 @@ impl Attach<'_> {
         let _ = send_request(&mut self.stream, &ClientRequest::Input { pane, bytes });
     }
 
+    /// Sends the instruction the project declares for the state `task` is
+    /// in to its agent, as one submission — on a click when `automatic` is
+    /// false, and when an operation of UZE's left the work there when it is
+    /// true. Never queued: a pane that may not take it now refuses with
+    /// the reason, and the status's click is how to send it later.
+    pub(super) fn send_instruction(&mut self, task: &AgentView, automatic: bool) {
+        /// How much of the instruction a toast quotes back.
+        const QUOTED: usize = 32;
+
+        let Some(instruction) = task.action.clone() else {
+            return;
+        };
+        let Some(pane) = self.model.pane_for_agent(&task.id) else {
+            if !automatic {
+                self.model.raise_toast(
+                    ToastKind::Told,
+                    "agent is not open",
+                    task.label.clone(),
+                    None,
+                );
+            }
+            return;
+        };
+        let submission = self.model.may_submit(pane);
+        match submission.refusal(&task.label) {
+            None => {
+                self.submit_notice(pane, &instruction);
+                self.model
+                    .note_agent_prompt_submission(pane, &self.identities, None);
+                self.model.raise_toast(
+                    ToastKind::Done,
+                    "sent to agent",
+                    crate::ui::widget::text::elide(&instruction, QUOTED),
+                    None,
+                );
+            }
+            Some((reason, _)) if automatic => {
+                self.model.raise_toast(
+                    ToastKind::Told,
+                    "held back",
+                    format!("{}: {reason}", task.label),
+                    None,
+                );
+            }
+            Some((title, detail)) => {
+                self.model.raise_toast(ToastKind::Told, title, detail, None);
+            }
+        }
+    }
+
     /// What the task evaluations answered: branches, targets, syncs and
     /// the tasks themselves, and any evaluation asked for again while
     /// one was out.
-    pub(super) fn absorb_task_evaluations(&mut self) {
+    pub(in crate::ui::orchestrator) fn absorb_task_evaluations(&mut self) {
         let mut asked_again = Vec::new();
         while let Ok(resolution) = self.channels.tasks.receiver.try_recv() {
+            let absorbed = self
+                .model
+                .remembered
+                .absorbed_generation
+                .entry(resolution.key.clone())
+                .or_default();
+            if let Some((primary, tasks)) = resolution.remote {
+                // Only onto the evaluation it finishes: a later one
+                // already drew states this answer was asked before.
+                if *absorbed <= resolution.generation {
+                    self.model.remembered.tasks.insert(primary, tasks);
+                    self.model.dirty = true;
+                }
+                continue;
+            }
+            *absorbed = (*absorbed).max(resolution.generation);
             self.model
                 .remembered
                 .task_eval_pending
@@ -72,7 +138,7 @@ impl Attach<'_> {
             // A store that could not be read is not a repository without
             // tasks, and must never be drawn as one: replacing what the
             // client already knew with an empty list takes every agent's
-            // branch, mark and delivery button away and puts nothing in
+            // branch, mark and status away and puts nothing in
             // their place. The last good answer stands, and the reason is
             // said instead.
             if let Some(reason) = evaluation.unreadable {
@@ -85,24 +151,44 @@ impl Attach<'_> {
             // the labels and publication UZE had recorded left behind in
             // a document it could not read.
             if let Some(recovered) = evaluation.recovered {
-                self.model.raise_toast(
-                    ToastKind::Warned,
-                    "recovered what the record still had",
-                    recovered,
-                    None,
-                );
+                self.model
+                    .raise_toast(ToastKind::Warned, "agents recovered", recovered, None);
             }
+            // Said once for each new set of reasons, not on every pass:
+            // the manifest is read again each time, and an unchanged typo
+            // is not news.
+            if evaluation.ignored_actions.is_empty() {
+                self.model.remembered.ignored_actions.remove(&primary);
+            } else if self.model.remembered.ignored_actions.get(&primary)
+                != Some(&evaluation.ignored_actions)
+            {
+                if let Some(first) = evaluation.ignored_actions.first() {
+                    self.model.raise_toast(
+                        ToastKind::Warned,
+                        "actions left out",
+                        first.clone(),
+                        None,
+                    );
+                }
+                self.model
+                    .remembered
+                    .ignored_actions
+                    .insert(primary.clone(), evaluation.ignored_actions);
+            }
+            let arrived: Vec<AgentView> = evaluation
+                .tasks
+                .iter()
+                .filter(|task| evaluation.arrived.contains(&task.id))
+                .cloned()
+                .collect();
             self.model
                 .remembered
                 .tasks
                 .insert(primary, evaluation.tasks);
-            // A conflict found while a clean task followed the target is
-            // the agent's to resolve: the message goes into its pane, as
-            // one submission.
-            for notice in evaluation.notices {
-                if let Some(pane) = self.model.pane_for_agent(&notice.task) {
-                    self.submit_notice(pane, &notice.message);
-                }
+            // A rebase this pass ran stopped on a conflict: the project's
+            // instruction for it goes to the agent.
+            for task in &arrived {
+                self.send_instruction(task, true);
             }
             self.model.dirty = true;
         }
@@ -138,28 +224,33 @@ impl Attach<'_> {
                     continue;
                 }
                 let kind = match &report.outcome {
-                    // Refused is the gate saying no, and returned is the
-                    // work coming back for the agent to answer: neither is
-                    // a delivery, and both need the reader.
+                    // Refused is the gate saying no, and a conflict or a
+                    // failed check is work that came back: neither is a
+                    // delivery, and both need the reader.
                     DeliveryOutcome::Refused { .. } => ToastKind::Failed,
-                    DeliveryOutcome::ReturnedToAgent(_) => ToastKind::Warned,
+                    DeliveryOutcome::Conflicted { .. } | DeliveryOutcome::Failed { .. } => {
+                        ToastKind::Warned
+                    }
                     _ => ToastKind::Done,
                 };
-                self.model.raise_toast(
-                    kind,
-                    describe_delivery(report),
-                    report.task.label.clone(),
-                    None,
-                );
-                // Two endings are the owning agent's to act on — a
-                // delivery that came back to it, and a published branch
-                // whose request is still unopened — and both reach it the
-                // same way: one submission into its pane.
-                if let DeliveryOutcome::ReturnedToAgent(notice)
-                | DeliveryOutcome::AwaitingRequest(notice) = &report.outcome
-                    && let Some(pane) = self.model.pane_for_agent(&notice.task)
-                {
-                    self.submit_notice(pane, &notice.message);
+                // A refusal's reason is what the reader needs, and too long
+                // for a title: it goes under one, where the label would.
+                let (title, detail) = match &report.outcome {
+                    DeliveryOutcome::Refused(reason) => {
+                        ("not delivered".to_owned(), reason.clone())
+                    }
+                    _ => (describe_delivery(report), report.task.label.clone()),
+                };
+                self.model.raise_toast(kind, title, detail, None);
+                // An operation of UZE's left the work in a new state, so
+                // the project's instruction for it goes to the agent.
+                if matches!(
+                    report.outcome,
+                    DeliveryOutcome::Published { .. }
+                        | DeliveryOutcome::Conflicted { .. }
+                        | DeliveryOutcome::Failed { .. }
+                ) {
+                    self.send_instruction(&report.task, true);
                 }
             }
             if resolution.reports.is_empty() {
@@ -172,14 +263,14 @@ impl Attach<'_> {
                 match &resolution.reserved {
                     Some(_) => self.model.raise_toast(
                         ToastKind::Failed,
-                        "the task could not be delivered",
-                        "its record is gone, or the document holding it could not be read",
+                        "not delivered",
+                        "its record is gone or unreadable",
                         None,
                     ),
                     None => self.model.raise_toast(
                         ToastKind::Told,
                         "nothing ready",
-                        "no task has commits the target lacks",
+                        "no task has commits to deliver",
                         None,
                     ),
                 }
@@ -309,6 +400,21 @@ impl Attach<'_> {
             // a relaunch needs the answer.
             spawn_conversation_refresh(self.home, agent_contexts(&self.model, &self.identities));
         }
+        if !self.model.remembered.checkout_watch_pending
+            && self
+                .model
+                .remembered
+                .last_checkout_watch
+                .is_none_or(|last| last.elapsed() >= CHECKOUT_WATCH)
+        {
+            self.model.remembered.last_checkout_watch = Some(Instant::now());
+            self.model.remembered.checkout_watch_pending = true;
+            spawn_checkout_watch(
+                self.home,
+                self.model.watched_checkouts(&self.identities),
+                self.channels.checkout_stamps.sender.clone(),
+            );
+        }
         if self
             .model
             .remembered
@@ -321,6 +427,109 @@ impl Attach<'_> {
                 self.model.space_directories(&self.identities),
                 self.channels.target_syncs.sender.clone(),
             );
+        }
+    }
+
+    /// Pulls the target into the focused checkout, as an editor's sync
+    /// count does when clicked. One at a time: a second click while one
+    /// runs is the same pull.
+    pub(in crate::ui::orchestrator) fn pull_target(&mut self) {
+        if self.model.remembered.pull_pending {
+            return;
+        }
+        let Some(cwd) = self.model.focused_cwd() else {
+            return;
+        };
+        self.model.remembered.pull_pending = true;
+        let target = self
+            .model
+            .remembered
+            .targets
+            .get(&evaluation_key(&cwd))
+            .cloned()
+            .unwrap_or_else(|| "the target".to_owned());
+        self.model.set_busy_notice(format!("pulling {target}"));
+        spawn_pull(self.home, cwd, self.channels.pulls.sender.clone());
+        self.model.dirty = true;
+    }
+
+    /// A pull that ended, said as an outcome, and the checkout read again
+    /// so its counts follow.
+    pub(super) fn absorb_pulls(&mut self) {
+        while let Ok(resolution) = self.channels.pulls.receiver.try_recv() {
+            self.model.remembered.pull_pending = false;
+            self.model.clear_busy_notice();
+            match resolution.report {
+                Some(report) => match report.pulled {
+                    Ok(0) => self.model.raise_toast(
+                        ToastKind::Told,
+                        "already up to date",
+                        report.target,
+                        None,
+                    ),
+                    Ok(commits) => {
+                        let plural = if commits == 1 { "" } else { "s" };
+                        self.model.raise_toast(
+                            ToastKind::Done,
+                            format!("pulled {commits} commit{plural}"),
+                            report.target,
+                            None,
+                        );
+                    }
+                    Err(reason) => {
+                        self.model
+                            .raise_toast(ToastKind::Failed, "pull refused", reason, None)
+                    }
+                },
+                None => self.model.raise_toast(
+                    ToastKind::Failed,
+                    "pull refused",
+                    "no target to pull",
+                    None,
+                ),
+            }
+            self.model
+                .schedule_evaluation(self.home, resolution.cwd, &self.channels.tasks.sender);
+            self.model.dirty = true;
+        }
+    }
+
+    /// Checkouts whose stamp moved since it was last read: Git recorded
+    /// something there, so its repository is evaluated now rather than on
+    /// the refresh clock. A checkout read for the first time only sets its
+    /// stamp — the evaluation that put it on screen already read it.
+    pub(in crate::ui::orchestrator) fn absorb_checkout_stamps(&mut self) {
+        while let Ok(resolution) = self.channels.checkout_stamps.receiver.try_recv() {
+            self.model.remembered.checkout_watch_pending = false;
+            // Each answer is every checkout watched now: one no longer
+            // asked about is forgotten, so coming back is a first read.
+            let watched: BTreeSet<&PathBuf> = resolution
+                .stamps
+                .iter()
+                .map(|(checkout, _)| checkout)
+                .collect();
+            self.model
+                .remembered
+                .checkout_stamps
+                .retain(|checkout, _| watched.contains(checkout));
+            for (checkout, stamp) in resolution.stamps {
+                let Some(stamp) = stamp else {
+                    self.model.remembered.checkout_stamps.remove(&checkout);
+                    continue;
+                };
+                let before = self
+                    .model
+                    .remembered
+                    .checkout_stamps
+                    .insert(checkout.clone(), stamp);
+                if before.is_some_and(|before| before != stamp) {
+                    self.model.schedule_evaluation(
+                        self.home,
+                        checkout,
+                        &self.channels.tasks.sender,
+                    );
+                }
+            }
         }
     }
 
@@ -339,12 +548,8 @@ impl Attach<'_> {
             if !behind.insert(report.project) {
                 continue;
             }
-            self.model.raise_toast(
-                ToastKind::Warned,
-                "The local target is behind its remote",
-                concern,
-                None,
-            );
+            self.model
+                .raise_toast(ToastKind::Warned, "target diverged", concern, None);
         }
     }
 
@@ -377,22 +582,12 @@ impl Attach<'_> {
                 continue;
             }
             let (kind, title) = if resolution.drifted {
-                (
-                    ToastKind::Warned,
-                    "AGENTS.md's workspace section was edited by hand",
-                )
+                (ToastKind::Warned, "AGENTS.md edited by hand")
             } else {
-                (
-                    ToastKind::Failed,
-                    "AGENTS.md's workspace section could not be updated",
-                )
+                (ToastKind::Failed, "AGENTS.md not updated")
             };
-            self.model.raise_toast(
-                kind,
-                title,
-                format!("{}: {}", resolution.file.display(), resolution.problem),
-                None,
-            );
+            self.model
+                .raise_toast(kind, title, resolution.problem, None);
         }
     }
 
@@ -416,13 +611,8 @@ impl Attach<'_> {
                 .join(", ");
             self.model.raise_toast(
                 ToastKind::Warned,
-                "A gate cannot run on this machine",
-                format!(
-                    "{}: {gates} has no `{}` spelling in agents.yaml, so delivery from here is \
-                     refused",
-                    answer.project.display(),
-                    answer.platform
-                ),
+                "gate can't run here",
+                format!("no `{}` form of {gates}", answer.platform),
                 None,
             );
         }

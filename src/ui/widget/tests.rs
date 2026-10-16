@@ -7,7 +7,7 @@ use uze_theme::Token;
 
 use super::{
     Align, Button, Chip, ChipState, Edge, Field, RowState, Rule, Surface, Toast, ToastKind,
-    action_index, button_row, field, mark, row, surface::fill, text, toast,
+    action_index, button_row, field, hint::Hints, mark, row, surface::fill, text, toast,
 };
 use crate::ui::theme;
 
@@ -1157,4 +1157,128 @@ fn an_arriving_toast_resizes_nothing() {
             "the one already on screen did not move or resize"
         );
     });
+}
+
+/// The cells a target covers, read back from what was drawn there.
+fn under(buffer: &ratatui::buffer::Buffer, rect: Rect) -> String {
+    (rect.x..rect.right())
+        .map(|x| buffer[(x, rect.y)].symbol().to_owned())
+        .collect()
+}
+
+const HINT_SCOPES: [uze_keys::Scope; 2] = [uze_keys::Scope::Global, uze_keys::Scope::Management];
+
+/// A hint of one key is the action it names: its target covers the key
+/// and its name, so a click lands on whatever of it was read.
+#[test]
+fn a_single_key_hint_is_a_target_over_what_it_says() {
+    use uze_keys::Action;
+    let mut targets = Vec::new();
+    let buffer = drawn(60, 1, |frame| {
+        targets = Hints::new(&HINT_SCOPES)
+            .key(Action::Refresh)
+            .key(Action::Dismiss)
+            .render(frame, Rect::new(4, 0, 56, 1));
+    });
+    let read: Vec<(String, Action)> = targets
+        .iter()
+        .map(|(rect, action)| (under(&buffer, *rect), *action))
+        .collect();
+    let named = |key: &str, action: Action| format!("{key} {}", action.label().to_lowercase());
+    assert_eq!(
+        read,
+        vec![
+            (named("f5", Action::Refresh), Action::Refresh),
+            (named("esc", Action::Dismiss), Action::Dismiss),
+        ]
+    );
+}
+
+/// A run is the keyboard's way through a list, and is read, never pointed
+/// at: neither its ends nor its name is a target, and the hints beside it
+/// still land where they are drawn.
+#[test]
+fn a_run_is_no_target() {
+    use uze_keys::Action;
+    let mut targets = Vec::new();
+    let buffer = drawn(60, 1, |frame| {
+        targets = Hints::new(&HINT_SCOPES)
+            .run(Action::SelectPrevious, Action::SelectNext, "move")
+            .run(Action::SelectTab(1), Action::SelectTab(5), "section")
+            .key(Action::Refresh)
+            .hovered(Some(Action::SelectNext))
+            .render(frame, Rect::new(0, 0, 60, 1));
+    });
+    assert_eq!(
+        targets
+            .iter()
+            .map(|(_, action)| *action)
+            .collect::<Vec<_>>(),
+        [Action::Refresh]
+    );
+    let refresh = format!("f5 {}", Action::Refresh.label().to_lowercase());
+    assert_eq!(under(&buffer, targets[0].0), refresh);
+}
+
+/// What does not fit is left out whole, and what was left out is no
+/// target: a click on the edge must not press a key nobody can see.
+#[test]
+fn a_hint_cut_for_width_offers_only_what_it_drew() {
+    use uze_keys::Action;
+    let hints = Hints::new(&HINT_SCOPES)
+        .key(Action::Refresh)
+        .key(Action::Dismiss);
+    let first = Hints::new(&HINT_SCOPES).key(Action::Refresh).width();
+    let mut targets = Vec::new();
+    drawn(40, 1, |frame| {
+        targets = hints.render(frame, Rect::new(0, 0, first + 2, 1));
+    });
+    assert_eq!(
+        targets
+            .iter()
+            .map(|(_, action)| *action)
+            .collect::<Vec<_>>(),
+        [Action::Refresh]
+    );
+}
+
+/// An action with no key here is neither drawn nor offered.
+#[test]
+fn an_unbound_action_is_no_target() {
+    let mut targets = Vec::new();
+    drawn(30, 1, |frame| {
+        targets = Hints::new(&HINT_SCOPES)
+            .key(uze_keys::Action::NewSpace)
+            .render(frame, Rect::new(0, 0, 30, 1));
+    });
+    assert!(targets.is_empty());
+}
+
+/// The hovered hint lights its label in its key's colour, and only that
+/// one: the look is the hint's, so it is the same on every surface.
+#[test]
+fn a_hovered_hint_lights_its_label_and_no_other() {
+    use uze_keys::Action;
+    let line = Hints::new(&HINT_SCOPES)
+        .key(Action::Refresh)
+        .key(Action::Dismiss)
+        .hovered(Some(Action::Dismiss))
+        .line();
+    let style_of = |text: &str| {
+        line.spans
+            .iter()
+            .find(|span| span.content == text)
+            .map(|span| span.style)
+            .expect(text)
+    };
+    let label = |action: Action| format!(" {}", action.label().to_lowercase());
+    assert_eq!(
+        style_of(&label(Action::Dismiss)),
+        theme::fg(Token::Accent),
+        "the colour alone: no weight moves under the pointer"
+    );
+    assert_eq!(
+        style_of(&label(Action::Refresh)),
+        theme::fg(Token::TextMuted)
+    );
 }

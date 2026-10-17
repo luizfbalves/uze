@@ -1,0 +1,217 @@
+# The landing page's hero, as a spec, performed by the real binary. It opens
+# where the product does, in the workspace; the package manager runs in the
+# space's own shell (a marketplace, one plugin, what each agent received);
+# agents on three harnesses then work side by side, each in a worktree of its
+# own; and the first is reviewed (spec, arch, code), commits through the
+# plugin's own skill, and is delivered.
+#
+#   tui-record seed   .demo/landing   # build the sandbox (first run, or after a /tmp wipe)
+#   tui-record probe  .demo/landing   # the shell in its sandbox, to try a selector out
+#   tui-record run    .demo/landing   # record → cut → leak-check → render → poster
+#
+# Its sandbox is the agent demos' one (.demo/_shared/agents.yml), and so is
+# the tmux session: never run two at once.
+
+extends:
+  - ../_shared/agents.yml
+  - ../_shared/macros.yml
+
+video:
+  title: uze
+  # The page plays the cut cast itself, as text; the GIF is rendered beside
+  # the spec only to check a take. HeroRecording's chapter times are read
+  # off the new cut.
+  out: .demo/landing/uze-landing.gif
+  poster: .demo/landing/uze-landing-poster.png
+  publish:
+    - from: cast
+      to: web/public/casts/landing.cast
+  # The marketplace on camera is the operator's own public one, and its
+  # owner's name is also this machine's user and host: the scan's username
+  # and hostname patterns match it, and nothing else does.
+  allow:
+    - hiukky/ai
+  cast: '{root}/uze-landing.cast'
+  # 140 columns keeps the text near the page's own body size at the width
+  # the page frames it, and still fits inspect's four harness columns.
+  cols: 140
+  speed: 1.2
+  # Twice the width the page shows it at, so a retina screen gets real pixels.
+  font_size: 22
+  wait_collapse: 1.5
+  # The workspace with all three agents named and the code surface on the
+  # finished one: the frame that says the most, for reduced motion.
+  poster_when: 'DIFF ·'
+sandbox:
+  cwd: '{fixtures}/demo-api'
+  # A shell, not the workspace: the first half of the story is the CLI.
+  command:
+    - '{home}/demoshell'
+  reset:
+    # Every take adds the marketplace and installs the plugin on camera, so
+    # both come off the machine first: through uze, which knows what it
+    # placed in each harness, never by deleting its directories.
+    - env -i HOME={home} PATH={home}/.uze/shims:{home}/.local/bin:{home}/bin:/usr/bin:/bin {project}/target/release/uze market remove ai >/dev/null 2>&1 || true
+fixtures:
+  - include: ../_shared/demo-api.yml
+beats:
+  # ── 1. open the workspace ───────────────────────────────────────────────
+  # From a bare shell, so the first thing on screen says this is a CLI; the
+  # rest happens inside it.
+  - say: a shell, in a project
+    pause: 0.6
+  - say: the workspace takes the screen, with a shell of its own
+    type: uze workspace
+    expect: demo-api
+    expect_in: sidebar
+    expect_timeout: 15
+    pause: 1.4
+  # ── 2. add a plugin ─────────────────────────────────────────────────────
+  # Typed into the space's own shell pane: the package manager is the same
+  # binary, reached from inside the screen it serves.
+  - say: a marketplace is added, a Git repository of plugins
+    type: uze market add hiukky/ai
+    expect: 1 marketplace added
+    expect_timeout: 60
+    pause: 1.0
+  - say: one plugin, installed once, for every agent
+    type: uze git@ai
+    expect: added to this project
+    expect_timeout: 90
+    pause: 1.0
+  - say: what each agent received, in its own form
+    type: uze inspect git
+    expect: files in place
+    expect_timeout: 15
+    pause: 3.0
+  # ── 3. agents side by side ──────────────────────────────────────────────
+  - use: launch-claude
+    with: {say: 'an agent on Claude Code, in a worktree of its own', menu_pause: 0.5, pause: 0.6}
+  # No commit asked for here: committing is what the plugin's skill does,
+  # once the change is there.
+  - type: add a /ping route to src/router.rs that answers pong, then commit it with the git:commit skill
+    expect: 'esc to interrupt|for \d+s · done'
+    expect_timeout: 120
+    pause: 0.6
+  - use: launch-codex
+    with: {say: 'a second, on Codex', menu_pause: 0.5, pause: 0.6}
+  - type: cover GET /health with a test in src/health.rs
+    pause: 0.8
+  - use: launch-opencode
+    with: {say: 'a third, on OpenCode', menu_pause: 0.5, pause: 0.6}
+  - type: add a Routes section to README.md listing every route in src/router.rs, without committing
+    pause: 0.8
+  # ── 4. review and deliver ───────────────────────────────────────────────
+  # OpenCode's change is left uncommitted, so it is the one the code surface
+  # has something to show for; Claude's is committed and is what gets
+  # delivered, which ends the story where the work lands.
+  - say: wait for OpenCode's edit, the only stretch the cut squeezes
+    wait: shell
+    until: grep -qs Routes /tmp/demos/demo-api/.worktrees/*/README.md
+    timeout: 300
+    settle: 2.0
+    pause: 0.4
+  - say: what the project plans
+    click: spec
+    in: strip
+    expect: add-rate-limiting
+    expect_in: pane
+    expect_timeout: 10
+    pause: 2.0
+  - say: what it wrote down about itself, drawn in cells
+    click: arch
+    in: strip
+    expect: system-context\.mmd
+    expect_timeout: 10
+    pause: 2.2
+  - say: and what this agent changed, in its own worktree
+    key: M-g
+    expect: 'DIFF ·'
+    expect_timeout: 10
+    refuse: no changes
+    pause: 3.0
+  - click: code
+    in: strip
+    expect: ctrl\+p commands
+    expect_timeout: 6
+    pause: 0.4
+  - wait: shell
+    until: for w in /tmp/demos/demo-api/.worktrees/*; do git -C "$w" log -1 --format=%s 2>/dev/null; done | grep -qi ping
+    timeout: 240
+    settle: 1.5
+    pause: 0.2
+  # The commit is already proven above; this only selects the agent, and
+  # Claude's footer is the one thing its pane always draws.
+  - say: Claude committed through the plugin's own skill
+    click: claude
+    in: sidebar
+    expect: shift\+tab to cycle
+    expect_in: pane
+    expect_timeout: 8
+    pause: 2.4
+  # Ready work is drawn as where it goes and how far ahead (`→ main ↑1`),
+  # in glyphs, so it is delivered by its documented chord rather than aimed
+  # at; the proof is the target itself carrying the commit.
+  - say: ready work is delivered, rebased, checked and merged
+    key: M-i
+    pause: 0.4
+  - wait: shell
+    until: git -C /tmp/demos/demo-api log -1 --format=%s main | grep -qi ping
+    timeout: 60
+    settle: 1.5
+    pause: 2.8
+  # ── 5. pick up anywhere ────────────────────────────────────────────────
+  # OpenCode's agent, with its README change uncommitted, is carried on in
+  # Claude Code: the same name, branch and worktree, briefed by uze. Its tab
+  # is then closed, the work goes to the shelf, and Recent brings it back.
+  - say: the same agent, carried on in another harness
+    click: opencode
+    in: sidebar
+    expect: ctrl\+p commands
+    expect_in: pane
+    expect_timeout: 8
+    pause: 0.6
+  - key: M-.
+    expect: Continue in
+    expect_timeout: 6
+    pause: 0.6
+  - key: [Down, Enter]
+    expect: Antigravity
+    expect_timeout: 6
+    pause: 0.8
+  # The submenu lists the harnesses set up here, Claude Code first.
+  - key: Enter
+    expect: continuing work another agent started
+    expect_in: pane
+    expect_timeout: 40
+    pause: 3.0
+  - say: closed, its work is kept
+    key: C-w
+    expect: work kept
+    expect_timeout: 8
+    pause: 1.6
+  - say: and Recent has it, across every project
+    key: M-p
+    expect: shelved
+    expect_in: sidebar
+    expect_timeout: 8
+    pause: 2.2
+  # Resumed, Claude reopens its own conversation, scrolled to its end: its
+  # footer, back in the pane the shell had, is what proves it.
+  - say: resumed where it was, its change put back
+    key: Enter
+    expect: shift\+tab to cycle
+    expect_in: pane
+    expect_timeout: 30
+    pause: 2.4
+  # ── the management side, in passing ─────────────────────────────────────
+  - use: manage-open
+    with: {say: 'the management side, in passing', pause: 0.8}
+  - use: manage-marketplace
+    with: {pause: 1.8}
+  - use: manage-integrations
+    with: {pause: 1.8}
+  - use: manage-close
+    with: {pause: 1.4}
+  - say: and out, the cut stops here, before the screen blanks
+    end: C-q

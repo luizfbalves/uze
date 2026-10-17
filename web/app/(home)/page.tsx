@@ -1,10 +1,10 @@
 import Link from 'next/link';
 import { Plus } from 'lucide-react';
 import { InstallTabs } from '@/components/install-tabs';
-import { HarnessMark, harnessMarks, homepageOf } from '@/components/harness-marks';
 import { TrademarkNotice } from '@/components/trademark-notice';
 import { faq } from '@/lib/home-content';
-import { ConsoleSession } from '@/components/home/session';
+import { HeroRecording } from '@/components/home/recording';
+import { HarnessOrbit } from '@/components/home/harness-orbit';
 import { SessionSummary } from '@/components/home/session-summary';
 import { HeroStage } from '@/components/home/hero-stage';
 
@@ -24,17 +24,25 @@ export default function HomePage() {
           hero={
             /* Below `md` the hero is a screen of its own: the claim and the
                way to install it, with nothing competing for the first view. */
-            <div className="flex min-h-[calc(100svh_-_var(--uze-banner-height)_-_3.5rem)] flex-col justify-center py-16 md:min-h-0 md:items-center md:py-0 md:text-center">
+            <div className="relative flex min-h-[calc(100svh_-_var(--uze-banner-height)_-_3.5rem)] flex-col justify-center py-16 md:min-h-0 md:items-center md:py-0 md:text-center">
+              <HarnessOrbit />
               {/* Each sentence on a line of its own, so a break never lands
                   mid-thought. */}
+              {/* Before the claim, what it is: nothing else on the first
+                  screen says uze runs in a terminal, and that is the first
+                  thing a reader needs to place it. In the terminal's green,
+                  the one hue the page spends the way a shell does. */}
+              <p className="mb-5 font-mono text-[13px] font-semibold tracking-tight text-success">
+                The terminal workspace for coding agents
+              </p>
               <h1 className="text-[2.3rem] font-semibold leading-[0.98] tracking-[-0.045em] text-ink sm:text-[4rem] lg:text-[4.25rem]">
                 <span className="block text-balance">Agents come and go.</span>
                 <span className="block text-balance">Your work stays.</span>
               </h1>
               <p className="mt-6 max-w-[44rem] text-pretty text-[17px] leading-relaxed text-muted sm:text-[18px]">
-                A layer between you and your agents: the same plugins and{' '}
+                A terminal-native ADE: the same plugins and{' '}
                 <code className="font-mono text-[0.95em] text-ink">AGENTS.md</code> in Claude Code,
-                Codex, OpenCode and Antigravity, and a terminal to run them side by side.
+                Codex, OpenCode and Antigravity, running side by side, each in its own worktree.
               </p>
               {/* One row for the one thing to do: the command, and the way
                   into the docs at its height. The source is a click away in
@@ -66,59 +74,13 @@ export default function HomePage() {
                   does not exist. `.dark` on the block re-points the tokens for
                   it alone. Framed as a window: at the full width of the page a
                   bare black panel read as a hole in it, not as a terminal. */}
-              <figure className="dark hidden overflow-hidden rounded-lg bg-paper text-ink shadow-[0_24px_60px_-20px_rgb(0_0_0/0.45)] ring-1 ring-black/10 md:block dark:ring-white/10">
-                <div className="relative flex h-9 items-center bg-surface px-4">
-                  <div className="flex gap-2" aria-hidden>
-                    <span className="size-3 rounded-full bg-line" />
-                    <span className="size-3 rounded-full bg-line" />
-                    <span className="size-3 rounded-full bg-line" />
-                  </div>
-                  <figcaption className="absolute inset-x-0 text-center font-mono text-xs text-muted">
-                    ~/project · uze
-                  </figcaption>
-                </div>
-                <div className="px-5 pb-2 [&>div]:border-b-0">
-                  <ConsoleSession />
-                </div>
-              </figure>
+              <div className="hidden md:block">
+                <HeroRecording />
+              </div>
               <div className="md:hidden">
                 <SessionSummary />
               </div>
 
-              {/* Under the session it describes and shaped like the chapter bar
-                  above it: the agents spread across the session's width, so the
-                  session sits framed between the two. Only beside the full
-                  session: the stacked summary names the agents in its own second
-                  step and links the matrix itself. */}
-              <div className="mt-8 hidden md:block">
-                {/* "Works with", never "powered by": the marks are the agents uze
-                    serves, not anything it is made of. */}
-                <ul className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3 px-5">
-                  {harnessMarks.map((harness) => (
-                    <li key={harness.name}>
-                      <a
-                        href={homepageOf(harness.name)}
-                        target="_blank"
-                        rel="noreferrer noopener"
-                        className="flex items-center gap-2 whitespace-nowrap text-ink transition-colors hover:text-muted"
-                      >
-                        <HarnessMark icon={harness.icon} className="size-4" />
-                        <span className="font-mono text-[13px] font-semibold">{harness.name}</span>
-                      </a>
-                    </li>
-                  ))}
-                </ul>
-                <p className="mt-5 border-t border-line px-5 pt-5 text-center text-sm leading-relaxed text-balance text-muted">
-                  Every route the agents report above is read from the integration that implements it.{' '}
-                  <Link
-                    href="/docs/reference/harnesses"
-                    className="text-ink underline decoration-line underline-offset-4 transition-colors hover:decoration-ink"
-                  >
-                    The full matrix, per capability
-                  </Link>
-                  .
-                </p>
-              </div>
             </div>
           }
         />

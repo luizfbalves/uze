@@ -63,6 +63,41 @@ pub(crate) fn content(red: u8, green: u8, blue: u8) -> Color {
     Color::Rgb(red, green, blue)
 }
 
+/// A pixel of an image, laid over the surface it is drawn on.
+///
+/// Content colour like [`content`], with the one thing an image carries
+/// that a highlighter does not: how much of the ground shows through it.
+/// The ground is the theme's backdrop, so a transparent icon sits on the
+/// pane rather than on a black square nobody drew.
+pub(crate) fn pixel(rgba: [u8; 4]) -> Color {
+    let [red, green, blue] = pixel_rgb(rgba);
+    Color::Rgb(red, green, blue)
+}
+
+/// [`pixel`] as the channels themselves.
+pub(crate) fn pixel_rgb(rgba: [u8; 4]) -> [u8; 3] {
+    over_ground(rgba, uze_theme::active().color(Token::SurfaceBackground))
+}
+
+/// [`pixel_rgb`] with the theme asked once, for an image sent to the
+/// terminal as pixels: one lookup for the image rather than one a pixel.
+pub(crate) fn laid_over_ground() -> impl Fn([u8; 4]) -> [u8; 3] {
+    let ground = uze_theme::active().color(Token::SurfaceBackground);
+    move |pixel| over_ground(pixel, ground)
+}
+
+fn over_ground([red, green, blue, alpha]: [u8; 4], ground: uze_theme::Rgb) -> [u8; 3] {
+    let over = |from: u8, to: u8| {
+        ((u16::from(from) * u16::from(alpha) + u16::from(to) * (255 - u16::from(alpha))) / 255)
+            as u8
+    };
+    [
+        over(red, ground.0),
+        over(green, ground.1),
+        over(blue, ground.2),
+    ]
+}
+
 /// One colour of a theme that is *not* in force, for the Appearance
 /// screen's swatches.
 ///

@@ -135,8 +135,8 @@ accepts, which is why the table sums to more than the number of crates.
 
 | Licence | Crates |
 | --- | --- |
-| Apache License 2.0 (`Apache-2.0`) | 193 |
-| MIT License (`MIT`) | 65 |
+| Apache License 2.0 (`Apache-2.0`) | 202 |
+| MIT License (`MIT`) | 66 |
 | Unicode License v3 (`Unicode-3.0`) | 1 |
 | zlib License (`Zlib`) | 1 |
 
@@ -168,6 +168,7 @@ accepts, which is why the table sums to more than the number of crates.
 | `bitflags` | 2.13.1 | MIT OR Apache-2.0 |
 | `block-buffer` | 0.12.1 | MIT OR Apache-2.0 |
 | `bumpalo` | 3.20.3 | MIT OR Apache-2.0 |
+| `byteorder-lite` | 0.1.0 | Unlicense OR MIT |
 | `bytes` | 1.12.1 | MIT |
 | `castaway` | 0.2.4 | MIT |
 | `cc` | 1.4.5 | MIT OR Apache-2.0 |
@@ -211,6 +212,7 @@ accepts, which is why the table sums to more than the number of crates.
 | `errno` | 0.3.14 | MIT OR Apache-2.0 |
 | `fancy-regex` | 0.16.2 | MIT |
 | `fastrand` | 2.5.0 | Apache-2.0 OR MIT |
+| `fdeflate` | 0.3.7 | MIT OR Apache-2.0 |
 | `filedescriptor` | 0.8.3 | MIT |
 | `find-msvc-tools` | 0.1.12 | MIT OR Apache-2.0 |
 | `flate2` | 1.1.10 | MIT OR Apache-2.0 |
@@ -226,6 +228,7 @@ accepts, which is why the table sums to more than the number of crates.
 | `futures-task` | 0.3.34 | MIT OR Apache-2.0 |
 | `futures-util` | 0.3.34 | MIT OR Apache-2.0 |
 | `getrandom` | 0.4.3 | MIT OR Apache-2.0 |
+| `gif` | 0.14.2 | MIT OR Apache-2.0 |
 | `hashbrown` | 0.16.1 | MIT OR Apache-2.0 |
 | `hashbrown` | 0.17.1 | MIT OR Apache-2.0 |
 | `heck` | 0.5.0 | MIT OR Apache-2.0 |
@@ -235,6 +238,7 @@ accepts, which is why the table sums to more than the number of crates.
 | `iana-time-zone` | 0.1.65 | MIT OR Apache-2.0 |
 | `iana-time-zone-haiku` | 0.1.2 | MIT OR Apache-2.0 |
 | `ident_case` | 1.0.1 | MIT OR Apache-2.0 |
+| `image-webp` | 0.2.4 | MIT OR Apache-2.0 |
 | `indexmap` | 2.14.2 | Apache-2.0 OR MIT |
 | `indicatif` | 0.18.6 | MIT |
 | `indoc` | 2.0.7 | MIT OR Apache-2.0 |
@@ -256,6 +260,7 @@ accepts, which is why the table sums to more than the number of crates.
 | `lru` | 0.18.4 | MIT |
 | `matchers` | 0.2.0 | MIT |
 | `memchr` | 2.8.3 | Unlicense OR MIT |
+| `miniz_oxide` | 0.8.9 | MIT OR Zlib OR Apache-2.0 |
 | `miniz_oxide` | 0.9.1 | MIT OR Zlib OR Apache-2.0 |
 | `mio` | 1.2.3 | MIT |
 | `miow` | 0.6.1 | MIT OR Apache-2.0 |
@@ -273,12 +278,14 @@ accepts, which is why the table sums to more than the number of crates.
 | `pin-project-lite` | 0.2.17 | Apache-2.0 OR MIT |
 | `piper` | 0.2.5 | MIT OR Apache-2.0 |
 | `plist` | 1.10.0 | MIT |
+| `png` | 0.18.1 | MIT OR Apache-2.0 |
 | `polling` | 3.11.0 | Apache-2.0 OR MIT |
 | `portable-atomic` | 1.15.0 | Apache-2.0 OR MIT |
 | `portable-pty` | 0.9.0 | MIT |
 | `powerfmt` | 0.2.0 | MIT OR Apache-2.0 |
 | `proc-macro2` | 1.0.107 | MIT OR Apache-2.0 |
 | `pulldown-cmark` | 0.13.4 | MIT |
+| `quick-error` | 2.0.1 | MIT OR Apache-2.0 |
 | `quick-xml` | 0.41.0 | MIT |
 | `quote` | 1.0.47 | MIT OR Apache-2.0 |
 | `r-efi` | 6.0.0 | MIT OR Apache-2.0 OR LGPL-2.1-or-later |
@@ -371,6 +378,7 @@ accepts, which is why the table sums to more than the number of crates.
 | `wasm-bindgen-macro-support` | 0.2.128 | MIT OR Apache-2.0 |
 | `wasm-bindgen-shared` | 0.2.128 | MIT OR Apache-2.0 |
 | `web-time` | 1.1.0 | MIT OR Apache-2.0 |
+| `weezl` | 0.1.12 | MIT OR Apache-2.0 |
 | `winapi` | 0.3.9 | MIT OR Apache-2.0 |
 | `winapi-i686-pc-windows-gnu` | 0.4.0 | MIT OR Apache-2.0 |
 | `winapi-util` | 0.1.11 | Unlicense OR MIT |
@@ -397,6 +405,8 @@ accepts, which is why the table sums to more than the number of crates.
 | `yaml-rust` | 0.4.5 | MIT OR Apache-2.0 |
 | `zeroize` | 1.9.0 | Apache-2.0 OR MIT |
 | `zmij` | 1.0.23 | MIT |
+| `zune-core` | 0.5.3 | MIT OR Apache-2.0 OR Zlib |
+| `zune-jpeg` | 0.5.15 | MIT OR Apache-2.0 OR Zlib |
 
 </details>
 

@@ -120,7 +120,6 @@ fn a_caption_too_long_for_its_room_passes_through_it() {
             title: "timeline".to_owned(),
             caption: Span::new(caption, Role::Muted),
             collapsed: true,
-            resizable: false,
             scroll: 0,
             rows: Vec::new(),
         };
@@ -131,8 +130,16 @@ fn a_caption_too_long_for_its_room_passes_through_it() {
             .draw(|frame| {
                 let mut rows = crate::ui::Rows::over(frame.area());
                 let sliding = tick.map(|tick| (ViewHit::ToggleSection, tick));
-                slid =
-                    render_section_with(frame, &section, &mut rows, false, sliding, &[], &mut hits);
+                slid = render_section(
+                    frame,
+                    &section,
+                    &mut rows,
+                    SectionState {
+                        sliding,
+                        ..SectionState::default()
+                    },
+                    &mut hits,
+                );
             })
             .unwrap();
         let row: String = (0..40)
@@ -181,7 +188,6 @@ fn a_rows_name_too_long_for_its_room_slides_under_the_pointer() {
         title: "timeline".to_owned(),
         caption: Span::new("main", Role::Muted),
         collapsed: false,
-        resizable: false,
         scroll: 0,
         rows: vec![uze_extensions::view::SectionRow {
             mark: uze_extensions::view::RowMark::Commit,
@@ -196,13 +202,14 @@ fn a_rows_name_too_long_for_its_room_slides_under_the_pointer() {
         terminal
             .draw(|frame| {
                 let mut rows = crate::ui::Rows::over(frame.area());
-                slid = render_section_with(
+                slid = render_section(
                     frame,
                     &section,
                     &mut rows,
-                    false,
-                    sliding,
-                    &[],
+                    SectionState {
+                        sliding,
+                        ..SectionState::default()
+                    },
                     &mut Vec::new(),
                 );
             })
@@ -241,29 +248,29 @@ fn the_row_under_the_pointer_lifts_its_name() {
         title: "timeline".to_owned(),
         caption: Span::new("main", Role::Muted),
         collapsed: false,
-        resizable: false,
         scroll: 0,
         rows: vec![commit("fix(ui): one"), commit("feat(cli): two")],
     };
-    let mut terminal = Terminal::new(TestBackend::new(40, 4)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(40, 6)).unwrap();
     terminal
         .draw(|frame| {
             let mut rows = crate::ui::Rows::over(frame.area());
-            render_section_with(
+            render_section(
                 frame,
                 &section,
                 &mut rows,
-                false,
-                None,
-                &[1],
+                SectionState {
+                    lit_rows: &[1],
+                    ..SectionState::default()
+                },
                 &mut Vec::new(),
             );
         })
         .unwrap();
     let buffer = terminal.backend().buffer();
     let bright = theme::color(Token::TextBright);
-    // The header, then one row per commit; the name starts past the
-    // lead, the mark and its gap.
+    // The header, then one row per commit; the name starts past the lead,
+    // the mark and its gap.
     let name = TRAILING_PAD + 2;
     assert_ne!(buffer[(name, 1)].fg, bright, "the resting row's name");
     assert_eq!(buffer[(name, 2)].fg, bright, "the hovered row's name");
@@ -272,6 +279,43 @@ fn the_row_under_the_pointer_lifts_its_name() {
         buffer[(name, 1)].bg,
         "on the same ground as its neighbour"
     );
+}
+
+/// The header is the handle the foot is pulled by, and nothing marks it
+/// at rest: while it is pulled, its title goes to the accent, the one sign
+/// the drag took before the rows move.
+#[test]
+fn a_pulled_header_lights_its_title() {
+    let section = Section {
+        title: "timeline".to_owned(),
+        caption: Span::new("main", Role::Muted),
+        collapsed: false,
+        scroll: 0,
+        rows: Vec::new(),
+    };
+    let title_fg = |dragging: bool| {
+        let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
+        terminal
+            .draw(|frame| {
+                let mut rows = crate::ui::Rows::over(frame.area());
+                render_section(
+                    frame,
+                    &section,
+                    &mut rows,
+                    SectionState {
+                        dragging,
+                        ..SectionState::default()
+                    },
+                    &mut Vec::new(),
+                );
+            })
+            .unwrap();
+        // Past the lead and the chevron, on the title's first letter.
+        terminal.backend().buffer()[(TRAILING_PAD + 2, 0)].fg
+    };
+    let accent = theme::color(Token::Accent);
+    assert_ne!(title_fg(false), accent, "at rest");
+    assert_eq!(title_fg(true), accent, "pulled");
 }
 
 /// Which drawn row a board's menu lands on: the first, with no frame

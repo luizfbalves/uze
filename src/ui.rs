@@ -595,10 +595,6 @@ impl FirstSteps<'_> {
             title: "first steps".to_owned(),
             caption: ViewSpan::new(self.caption(), Role::Faint),
             collapsed: self.collapsed,
-            // Nothing to drag: the list is as long as it is, and a handle
-            // that can only ever be dropped in one place is a control that
-            // does nothing.
-            resizable: false,
             scroll: 0,
             rows: self
                 .steps
@@ -677,15 +673,16 @@ impl FirstSteps<'_> {
     /// before they lay out what sits above it — a strip pinned to the foot
     /// that the list above could grow over would be pinned to nothing.
     pub(crate) fn height(&self) -> u16 {
+        use crate::ui::extension_view::{SECTION_AIR, SECTION_CHROME};
         if self.collapsed {
-            1
+            SECTION_CHROME
         } else {
             // The trailing row is blank on purpose: open, the last step
             // would otherwise sit against the next section's header with
             // nothing saying where one ends and the other begins. The
             // section renderer simply runs out of rows before it reaches
             // it, so no one has to draw the gap.
-            1 + self.steps.len() as u16 + 1
+            SECTION_CHROME + self.steps.len() as u16 + SECTION_AIR
         }
     }
 

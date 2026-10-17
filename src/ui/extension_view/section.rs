@@ -2,46 +2,55 @@
 
 use super::*;
 
+/// The rows of a section that are not its content: its header alone.
+/// Whoever reserves a section's rows adds it.
+pub(crate) const SECTION_CHROME: u16 = 1;
+
+/// The blank row an open section keeps under its last row while another
+/// section's header sits below it. Reserved by the host, never drawn: the
+/// renderer runs out of rows before it reaches it.
+pub(crate) const SECTION_AIR: u16 = 1;
+
+/// What the host knows about a section while drawing it, and the section
+/// itself may not hold: every field is the host's own state, because the
+/// gestures belong to the host, not to whoever the section came from.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct SectionState<'a> {
+    /// Whether the header is being pulled right now.
+    pub(crate) dragging: bool,
+    /// The hit under the pointer and the clock a caption of it too long
+    /// for its room slides by — the header's caption, or a row's name —
+    /// instead of stopping at an "…".
+    pub(crate) sliding: Option<(ViewHit, usize)>,
+    /// The rows lifted to the bright text the row receiving keystrokes
+    /// wears: the one under the pointer, since a row that opens something
+    /// on a click says so before it is clicked, and the one whatever it
+    /// opened is showing right now. The text alone, not a ground — a band
+    /// under a row in this column reads as the selection.
+    pub(crate) lit_rows: &'a [usize],
+}
+
 /// Draws one extension [`Section`] into the rows it is given, and reports
-/// what a click on each row would mean.
+/// what a click on each row would mean. Answers whether anything actually
+/// slid, which is what tells the host's own clock it has a reason to keep
+/// turning.
 ///
 /// The counterpart to [`render`] for a section rather than a full frame,
 /// and the reason it is here rather than in either sidebar: an extension
 /// section is an extension surface, and both of them resolve colour,
-/// eliding and hit rectangles in this one module. `dragging` is the host's
-/// own state — whether the divider under the header is being pulled right
-/// now — because the gesture belongs to the host, not to whoever the
-/// section came from.
+/// eliding and hit rectangles in this one module.
 pub(crate) fn render_section(
     frame: &mut ratatui::Frame<'_>,
     section: &Section,
     rows: &mut crate::ui::Rows,
-    dragging: bool,
+    state: SectionState<'_>,
     hits: &mut Vec<(Rect, ViewHit)>,
 ) -> bool {
-    render_section_with(frame, section, rows, dragging, None, &[], hits)
-}
-
-/// The same, with `sliding` the row under the pointer and the clock a
-/// caption of it too long for its room slides by — the header's caption,
-/// or a row's name — instead of stopping at an "…". Answers whether
-/// anything actually slid, which is what tells the host's own clock it
-/// has a reason to keep turning.
-///
-/// `lit_rows` are the rows lifted to the bright text the row
-/// receiving keystrokes wears: the one under the pointer, since a row that
-/// opens something on a click says so before it is clicked, and the one
-/// whatever it opened is showing right now. The text alone, not a ground —
-/// a band under a row in this column reads as the selection.
-pub(crate) fn render_section_with(
-    frame: &mut ratatui::Frame<'_>,
-    section: &Section,
-    rows: &mut crate::ui::Rows,
-    dragging: bool,
-    sliding: Option<(ViewHit, usize)>,
-    lit_rows: &[usize],
-    hits: &mut Vec<(Rect, ViewHit)>,
-) -> bool {
+    let SectionState {
+        dragging,
+        sliding,
+        lit_rows,
+    } = state;
     let Some(header_rect) = rows.next(1) else {
         return false;
     };
@@ -56,6 +65,12 @@ pub(crate) fn render_section_with(
     let mut title_style = Style::default().fg(theme::color(Token::TextSecondary));
     if !section.collapsed {
         title_style = title_style.add_modifier(Modifier::BOLD);
+    }
+    // The header is the handle the foot is pulled by, and the title goes
+    // to the accent while it is pulled, the way the sidebar's own border
+    // does: the one sign the drag took before the rows move.
+    if dragging {
+        title_style = title_style.fg(theme::color(Token::Accent));
     }
     // One column in, the pad the caption keeps at the other end: on the
     // band an open section wears, a chevron flush against the edge under a
@@ -94,37 +109,19 @@ pub(crate) fn render_section_with(
     // column says "this is a heading over content"; on a folded section
     // there is no content, and the band reads as a control of its own —
     // two of them stacked at the foot of the sidebar read as a toolbar.
+    // The subtler of the raised grounds: the band only has to set the
+    // heading off, and the brighter one outweighed the rows it heads.
     if !section.collapsed {
         row::pad_to(
             &mut spans,
             header_rect.width,
-            theme::color(Token::SurfaceRaised),
+            theme::color(Token::SurfaceRaisedSubtle),
         );
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), header_rect);
     hits.push((header_rect, ViewHit::ToggleSection));
     if section.collapsed {
         return slid;
-    }
-    // The divider between the header and its rows doubles as the drag
-    // handle, the way the sidebar's own border does — lit in the accent
-    // while it is being dragged, same as that border.
-    if section.resizable
-        && let Some(handle_rect) = rows.next(1)
-    {
-        let hue = if dragging {
-            theme::color(Token::Accent)
-        } else {
-            theme::color(Token::BorderFaint)
-        };
-        frame.render_widget(
-            Paragraph::new(TextSpan::styled(
-                theme::glyph(Symbol::TreeDivider).repeat(handle_rect.width as usize),
-                Style::default().fg(hue),
-            )),
-            handle_rect,
-        );
-        hits.push((handle_rect, ViewHit::ResizeSection));
     }
     // Scrolled by whole rows, never past the page that ends on the last
     // one — so the section is always full when its content is.

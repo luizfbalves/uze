@@ -1,6 +1,7 @@
 //! The sidebar: spaces, their agents, the spec summary, first steps and the timeline.
 
 use super::*;
+use crate::ui::extension_view::{SECTION_AIR, SECTION_CHROME, SectionState};
 
 /// Whether `cwd` is outside any slot: no repository, no commit to branch
 /// from — or an agent that simply has not been isolated, standing in
@@ -298,6 +299,14 @@ pub(in crate::ui::orchestrator) fn render_sidebar(
         )
     });
     let foot = reserved + spec_reserved;
+    // Every header at the foot is a handle on the timeline (see
+    // `WorkspaceModel::grab_foot`), and the one lit while dragging is the
+    // one held: its distance from the timeline's own header is the grab.
+    let grabbed = |offset: u16| {
+        model
+            .timeline_grab
+            .is_some_and(|grab| grab.moved && grab.offset == offset)
+    };
     let strip = steps.rect(Rect::new(
         inner.x,
         inner.y,
@@ -422,7 +431,10 @@ pub(in crate::ui::orchestrator) fn render_sidebar(
             frame,
             &steps.section(),
             &mut Rows::over(rect),
-            false,
+            SectionState {
+                dragging: grabbed(spec_reserved + rect.height),
+                ..SectionState::default()
+            },
             &mut section_hits,
         );
         // The closing mark rides on the header, and an ordinary click
@@ -454,14 +466,21 @@ pub(in crate::ui::orchestrator) fn render_sidebar(
         && spec_reserved > 0
     {
         rows.scroll_past(0);
-        let air = if model.spec_summary_open && spec_reserved > 1 {
-            SPEC_SUMMARY_AIR
+        let air = if model.spec_summary_open && spec_reserved > SECTION_CHROME {
+            SECTION_AIR
         } else {
             0
         };
         rows.bottom = column_bottom - reserved - air;
         rows.y = column_bottom - foot;
-        metrics.marquee |= render_spec_summary(frame, summary, model, &mut rows, hits);
+        metrics.marquee |= render_spec_summary(
+            frame,
+            summary,
+            model,
+            grabbed(spec_reserved),
+            &mut rows,
+            hits,
+        );
     }
     if let Some(timeline) = timeline
         && reserved > 0
@@ -469,7 +488,7 @@ pub(in crate::ui::orchestrator) fn render_sidebar(
         rows.scroll_past(0);
         rows.bottom = column_bottom;
         rows.y = column_bottom - reserved;
-        metrics.marquee |= render_timeline(frame, timeline, model, &mut rows, hits);
+        metrics.marquee |= render_timeline(frame, timeline, model, grabbed(0), &mut rows, hits);
     }
 }
 
@@ -485,27 +504,26 @@ pub(in crate::ui::orchestrator) fn spec_summary_height(
     remaining: u16,
 ) -> u16 {
     let budget = remaining / 2;
-    if budget < 1 {
+    if budget < SECTION_CHROME {
         return 0;
     }
     let changes = u16::try_from(summary.changes.len()).unwrap_or(u16::MAX);
     if open {
-        1 + changes + SPEC_SUMMARY_AIR
+        SECTION_CHROME + changes + SECTION_AIR
     } else {
-        1
+        SECTION_CHROME
     }
     .min(budget)
 }
 
-/// The blank row an open spec section keeps under its last change.
-pub(super) const SPEC_SUMMARY_AIR: u16 = 1;
-
 /// The sidebar's spec section. The extension says what it holds; this
-/// supplies the fold, which is host state, and tags the hits it gets back.
+/// supplies the fold and whether its header is being pulled, which are
+/// host state, and tags the hits it gets back.
 pub(super) fn render_spec_summary(
     frame: &mut ratatui::Frame<'_>,
     summary: &uze_extensions::spec::Summary,
     model: &WorkspaceModel,
+    dragging: bool,
     rows: &mut Rows,
     hits: &mut Vec<(Rect, WorkspaceHit)>,
 ) -> bool {
@@ -531,13 +549,15 @@ pub(super) fn render_spec_summary(
                 .position(|change| change.name == name)
         });
     let lit_rows: Vec<usize> = hovered_row.into_iter().chain(on_show).collect();
-    let slid = crate::ui::extension_view::render_section_with(
+    let slid = crate::ui::extension_view::render_section(
         frame,
         &section,
         &mut column,
-        false,
-        under.map(|hit| (hit, model.hovered_for())),
-        &lit_rows,
+        SectionState {
+            dragging,
+            sliding: under.map(|hit| (hit, model.hovered_for())),
+            lit_rows: &lit_rows,
+        },
         &mut section_hits,
     );
     hits.extend(section_hits.into_iter().map(|(rect, hit)| {
@@ -1175,12 +1195,11 @@ pub(in crate::ui::orchestrator) const FIRST_STEP_SCOPES: &[uze_keys::Scope] = &[
 pub(super) const MIN_TREE_ROWS: u16 = 4;
 
 /// The rows the timeline section takes at the foot of the column: its
-/// header, and while it is open the divider under it and one row per
-/// commit. Left alone, that is within half of what the column has left,
-/// since the spaces are what the sidebar is for; dragged (`rows_wanted`),
-/// it is what was asked for, within the history there is and what the
-/// column can spare past the tree's minimum. Nothing when even the header
-/// would not fit.
+/// header, and while it is open one row per commit. Left alone, that is
+/// within half of what the column has left, since the spaces are what the
+/// sidebar is for; dragged (`rows_wanted`), it is what was asked for,
+/// within the history there is and what the column can spare past the
+/// tree's minimum. Nothing when even the header would not fit.
 pub(in crate::ui::orchestrator) fn timeline_height(
     timeline: &uze_extensions::code::Timeline,
     collapsed: bool,
@@ -1189,24 +1208,19 @@ pub(in crate::ui::orchestrator) fn timeline_height(
 ) -> u16 {
     let commits = timeline.commits.len() as u16;
     let (chrome, rows, budget) = match rows_wanted {
-        _ if collapsed => (1, 0, remaining / 2),
+        _ if collapsed => (SECTION_CHROME, 0, remaining / 2),
         Some(wanted) => (
-            TIMELINE_CHROME,
+            SECTION_CHROME,
             wanted.clamp(1, commits),
             remaining.saturating_sub(MIN_TREE_ROWS),
         ),
-        None => (TIMELINE_CHROME, commits, remaining / 2),
+        None => (SECTION_CHROME, commits, remaining / 2),
     };
     if budget < chrome {
         return 0;
     }
     (chrome + rows).min(budget)
 }
-
-/// The rows of an open timeline section that are not commits: its header
-/// and the divider under it. The drag handler subtracts the same two to
-/// turn where the divider was dropped into a count of commit rows.
-pub(in crate::ui::orchestrator) const TIMELINE_CHROME: u16 = 2;
 
 /// The sidebar's commit-timeline section.
 ///
@@ -1220,6 +1234,7 @@ pub(super) fn render_timeline(
     frame: &mut ratatui::Frame<'_>,
     timeline: &uze_extensions::code::Timeline,
     model: &WorkspaceModel,
+    dragging: bool,
     rows: &mut Rows,
     hits: &mut Vec<(Rect, WorkspaceHit)>,
 ) -> bool {
@@ -1243,13 +1258,15 @@ pub(super) fn render_timeline(
         Some(ViewHit::SelectItem(index)) => Some(index),
         _ => None,
     };
-    let sliding = crate::ui::extension_view::render_section_with(
+    let sliding = crate::ui::extension_view::render_section(
         frame,
         &section,
         &mut column,
-        model.dragging_timeline,
-        under.map(|hit| (hit, model.hovered_for())),
-        hovered_row.as_slice(),
+        SectionState {
+            dragging,
+            sliding: under.map(|hit| (hit, model.hovered_for())),
+            lit_rows: hovered_row.as_slice(),
+        },
         &mut section_hits,
     );
     hits.extend(section_hits.into_iter().map(|(rect, hit)| {

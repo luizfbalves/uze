@@ -307,6 +307,7 @@ impl Health<'_> {
             capabilities: integration.capabilities(),
             runtime_shim_active,
             context_support: HarnessContextSupport::declared(integration, runtime_shim_active),
+            agent_context: agent_context_shortfall(integration),
         }
     }
 
@@ -432,6 +433,18 @@ impl Health<'_> {
             project_lock,
             issues,
             held_back: held_back_notes(self.0, None),
+            memory: self.0.memory().report_at(&context.canonical),
+            agent_context: self
+                .0
+                .integrations
+                .iter()
+                .map(|integration| integration.as_ref())
+                .filter(|integration| self.0.detect_cached(*integration).present)
+                .filter_map(|integration| {
+                    agent_context_shortfall(integration)
+                        .map(|reason| format!("{}: {reason}", integration.display_name()))
+                })
+                .collect(),
         })
     }
 }
@@ -459,6 +472,22 @@ fn package_store_inconsistency(package: &StoredPackage) -> Option<String> {
         ));
     }
     None
+}
+
+/// Why an agent the workspace launches on `integration` is not given its
+/// context invisibly, if it is not: no channel at all, or one that cannot
+/// run on this machine right now.
+pub(crate) fn agent_context_shortfall(integration: &dyn IntegrationPort) -> Option<String> {
+    if let Some(reason) = integration.context_channel_unavailable() {
+        return Some(format!(
+            "agent context (memory and briefings) does not reach it ({reason})"
+        ));
+    }
+    integration.context_channel().is_degraded().then(|| {
+        "agent context does not reach it: no memory is given, and a switched agent is pointed \
+         at its briefing by a visible first turn"
+            .to_owned()
+    })
 }
 
 #[cfg(test)]

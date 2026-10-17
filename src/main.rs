@@ -886,6 +886,8 @@ mod status_output_tests {
             drift: EnvironmentDrift::default(),
             issues: Vec::new(),
             held_back: Vec::new(),
+            agent_context: Vec::new(),
+            memory: Default::default(),
         };
         ProjectStatus {
             report,

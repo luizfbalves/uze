@@ -42,6 +42,7 @@ mod digest;
 mod generate;
 mod hooks;
 mod mcp;
+mod memory;
 mod plugin;
 mod preferences;
 mod runtime;
@@ -252,6 +253,39 @@ impl IntegrationPort for ClaudeIntegration {
 
     fn first_turn_args(&self, turn: &str) -> Vec<std::ffi::OsString> {
         session::first_turn_args(turn)
+    }
+
+    /// A `CLAUDE.md` in the agent's own `--add-dir` directory, which Claude
+    /// loads like the project's instructions and loads again on every
+    /// launch. Measured on 2.1.301: nothing in the pane, present after a
+    /// resume, and each launch's copy kept in the transcript beside the
+    /// earlier ones (`experiments/claude/agent-context`).
+    fn context_channel(&self) -> uze_core::integration::ContextChannel {
+        uze_core::integration::ContextChannel::Directory
+    }
+
+    fn context_accumulates(&self) -> bool {
+        true
+    }
+
+    /// Claude's auto memory, read where Claude keeps it; never written.
+    fn memory_source(&self, project_root: &Path) -> Vec<uze_core::memory::MemoryEntry> {
+        memory::source(&self.transcripts_root, project_root, self.id())
+    }
+
+    /// Claude's system prompt carries its own memory instruction, which
+    /// outweighs anything a project's context says, so a Claude agent
+    /// remembers the way Claude does and UZE reads it.
+    fn writes_own_memory(&self) -> bool {
+        true
+    }
+
+    fn deliver_context(
+        &self,
+        _home: &uze_core::UzeHome,
+        ctx: &uze_core::integration::AgentContext,
+    ) -> Result<uze_core::integration::ContextContribution> {
+        runtime::agent_context(ctx)
     }
 
     fn conversation_digest(

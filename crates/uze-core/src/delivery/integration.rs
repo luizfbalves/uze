@@ -195,6 +195,61 @@ pub enum SessionContinuity {
     Unsupported,
 }
 
+/// How an agent UZE launched receives the context UZE composed for it:
+/// placed before the model the way `AGENTS.md` is, never shown as a turn
+/// the operator did not type, and given again on a resume.
+///
+/// Declared per integration from what the Lab measured against the real
+/// binary (`experiments/<vendor>/agent-context`), never assumed: the
+/// default is the visible first turn, which only a briefing ever takes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContextChannel {
+    /// An instructions file in a directory the launch adds, read again by
+    /// the harness on every launch.
+    Directory,
+    /// A hook given to this process only, whose handler prints the
+    /// composed document.
+    LaunchHook,
+    /// A plugin installed once, which finds the document by the
+    /// conversation UZE assigned the launch.
+    SessionPlugin,
+    /// No invisible channel: a briefing is pointed at by one first turn,
+    /// and nothing else is delivered.
+    FirstTurn,
+}
+
+impl ContextChannel {
+    /// Whether this is the visible fallback rather than a channel.
+    pub fn is_degraded(self) -> bool {
+        self == Self::FirstTurn
+    }
+}
+
+/// One launch's composed context, as a channel delivers it.
+pub struct AgentContext<'a> {
+    /// The agent's own context directory, which the channel may write into
+    /// and add to the launch.
+    pub dir: &'a Path,
+    /// The composed document inside `dir`.
+    pub file: &'a Path,
+    /// What the document holds.
+    pub text: &'a str,
+    /// Unique to this launch, for a channel that must give the document
+    /// once per process rather than once per model call.
+    pub launch: &'a str,
+    /// The conversation this launch starts or resumes, when UZE knows it
+    /// before the process does.
+    pub session: Option<&'a SessionId>,
+}
+
+/// What a channel adds to one launch. Never the document's text: only paths
+/// reach the process's arguments or environment.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ContextContribution {
+    pub args: Vec<OsString>,
+    pub env: Vec<(OsString, OsString)>,
+}
+
 /// What a read-back is allowed to accept, gathered at the launch it answers
 /// for.
 pub struct ObservationContext<'a> {
@@ -364,6 +419,62 @@ pub trait IntegrationPort: Send + Sync {
     fn first_turn_args(&self, _turn: &str) -> Vec<OsString> {
         Vec::new()
     }
+
+    /// The channel this harness's agents receive their context through.
+    /// The default is the visible first turn: a harness nobody has measured
+    /// is told nothing it would show.
+    fn context_channel(&self) -> ContextChannel {
+        ContextChannel::FirstTurn
+    }
+
+    /// Whether the channel leaves each launch's copy in the conversation,
+    /// so a resumed one holds the earlier copies beside the current one.
+    fn context_accumulates(&self) -> bool {
+        false
+    }
+
+    /// Why the channel cannot reach the model on this machine right now,
+    /// asked before a launch relies on it: a harness-side switch its hooks
+    /// depend on, for example. `None` when nothing stands in its way.
+    fn context_channel_unavailable(&self) -> Option<String> {
+        None
+    }
+
+    /// Writes what the channel needs for `ctx` and answers with what the
+    /// launch carries. Only asked of a channel that is not
+    /// [`ContextChannel::FirstTurn`].
+    fn deliver_context(&self, _home: &UzeHome, _ctx: &AgentContext) -> Result<ContextContribution> {
+        Ok(ContextContribution::default())
+    }
+
+    /// The facts this harness keeps for `project_root` (and for the
+    /// machine) that UZE reads into every agent's memory index, never
+    /// copying, moving or changing them. Each is read-only, and `origin` is
+    /// this integration's id. The default is none.
+    fn memory_source(&self, _project_root: &Path) -> Vec<crate::memory::MemoryEntry> {
+        Vec::new()
+    }
+
+    /// Whether this harness's agents write their facts into its own memory,
+    /// following its own instruction. Such an agent is given no
+    /// instruction to write through UZE: one model told two ways to
+    /// remember follows whichever it weighs more, and splits the memory.
+    fn writes_own_memory(&self) -> bool {
+        false
+    }
+
+    /// What one launch carries to turn this harness's own memory off,
+    /// where it can be turned off per launch and is not how its agents
+    /// write. `None` where there is nothing to turn off, or no way to.
+    fn memory_off(&self) -> Option<ContextContribution> {
+        None
+    }
+
+    /// Takes back what an earlier launch's delivery left where the harness
+    /// keeps reading it, when this launch has nothing to give. Only a
+    /// channel that reads outside the launch's own arguments needs it: one
+    /// given per launch is simply not given again.
+    fn withdraw_context(&self, _home: &UzeHome, _session: Option<&SessionId>) {}
 
     /// What `session`'s transcript says the conversation was about, read
     /// from this harness's own records, keeping only what was said at or

@@ -35,13 +35,14 @@ impl Attach<'_> {
         let drawn_over = model.approval.is_some()
             || model.interrupt.is_some()
             || model.proposal.is_some()
+            || model.asks_worktree_removal()
+            || model.shows_space_issues()
             || model.release_notes.is_some()
             || model.action_index.is_some()
             || model.renaming.is_some()
             || model.root_picker.is_some()
             || model.agent_picker.is_some()
             || model.context_menu.is_some()
-            || model.support_dropdown.is_some()
             || model.commit_detail_open()
             || model.status_catalog.is_some();
         if !model.recent.open || drawn_over {

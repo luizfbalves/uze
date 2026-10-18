@@ -1415,3 +1415,175 @@ pub(super) fn spawn_clear_prompt_history(
         let _ = sender.send(PromptHistoryResolution { root, entries });
     });
 }
+
+/// Reads a space's overview: `uze status`'s computation, which re-runs a
+/// harness's CLI when its inspection is not cached, plus the plugin index
+/// and the `workspace:` declaration, which asks Git about each link.
+pub(super) fn spawn_space_overview(
+    home: &UzeHome,
+    space: SpaceId,
+    asked: u64,
+    root: PathBuf,
+    sender: mpsc::Sender<SpaceOverviewResolution>,
+) {
+    let home = home.clone();
+    let parent = tracing::Span::current();
+    thread::spawn(move || {
+        let _pass = crate::telemetry::background_pass!("tui.space_overview", parent: &parent);
+        let answer = answered_or(
+            || {
+                tui_application(home)
+                    .and_then(|app| app.workspace().space_overview(&root))
+                    .map_err(|error| error.to_string())
+            },
+            Err("reading the overview failed".to_owned()),
+        );
+        let _ = sender.send(SpaceOverviewResolution {
+            space,
+            asked,
+            answer,
+        });
+    });
+}
+
+/// Measures the worktrees of the space rooted at `root`, for the
+/// overview's Worktrees section: [`spawn_checkouts`]' read, a walk of every
+/// directory of every checkout, answered by space so an overview put away
+/// meanwhile drops it.
+pub(super) fn spawn_space_worktrees(
+    home: &UzeHome,
+    space: SpaceId,
+    asked: u64,
+    root: PathBuf,
+    sender: mpsc::Sender<WorktreesResolution>,
+) {
+    let home = home.clone();
+    let parent = tracing::Span::current();
+    thread::spawn(move || {
+        let _pass = crate::telemetry::background_pass!("tui.space_worktrees", parent: &parent);
+        let view = answered_or(
+            || {
+                tui_application(home)
+                    .ok()
+                    .and_then(|app| app.workspace().checkouts(&root))
+            },
+            None,
+        );
+        let _ = sender.send(WorktreesResolution { space, asked, view });
+    });
+}
+
+/// What removing a free worktree is asked with.
+pub(super) struct WorktreeRemovalRequest {
+    pub(super) space: SpaceId,
+    pub(super) root: PathBuf,
+    pub(super) path: PathBuf,
+    pub(super) name: String,
+    pub(super) bytes: u64,
+    /// Every checkout a pane of this client stands in.
+    pub(super) occupied: Vec<PathBuf>,
+}
+
+/// Removes a free worktree the operator answered for: a rename under the
+/// repository's lock, then a recursive deletion of what may be gigabytes
+/// of build output. Answers either way, since the overview takes no
+/// second removal until this one does.
+pub(super) fn spawn_worktree_removal(
+    home: &UzeHome,
+    request: WorktreeRemovalRequest,
+    sender: mpsc::Sender<RemovalResolution>,
+) {
+    let home = home.clone();
+    let parent = tracing::Span::current();
+    thread::spawn(move || {
+        let _span = tracing::info_span!(parent: &parent, "tui.worktree_removal").entered();
+        let WorktreeRemovalRequest {
+            space,
+            root,
+            path,
+            name,
+            bytes,
+            occupied,
+        } = request;
+        let outcome = answered_or(
+            || {
+                tui_application(home)
+                    .map_err(|error| error.to_string())
+                    .and_then(|app| {
+                        app.workspace()
+                            .remove_free_checkout(&root, &path, &occupied)
+                    })
+            },
+            Err("removing the worktree failed".to_owned()),
+        );
+        let _ = sender.send(RemovalResolution {
+            space,
+            name,
+            bytes,
+            outcome,
+        });
+    });
+}
+
+/// Reads one of the project's facts, for the overview's drawer.
+pub(super) fn spawn_fact_body(
+    home: &UzeHome,
+    space: SpaceId,
+    root: PathBuf,
+    name: String,
+    sender: mpsc::Sender<FactBodyResolution>,
+) {
+    let home = home.clone();
+    let parent = tracing::Span::current();
+    thread::spawn(move || {
+        let _span = tracing::info_span!(parent: &parent, "tui.fact_body").entered();
+        use uze_application::application::memory::{MemoryCaller, MemoryScope};
+        let body = answered_or(
+            || {
+                tui_application(home)
+                    .and_then(|app| {
+                        app.memory().show(
+                            MemoryCaller::Operator { cwd: &root },
+                            MemoryScope::Project,
+                            &name,
+                        )
+                    })
+                    .map(|shown| shown.body)
+                    .map_err(|error| error.to_string())
+            },
+            Err("reading the fact failed".to_owned()),
+        );
+        let _ = sender.send(FactBodyResolution { space, name, body });
+    });
+}
+
+/// Writes the overview's `workspace:` edits into `agents.yaml`, or has
+/// them refused with every problem the workspace finds, off the frame: a
+/// link is checked by asking Git whether it is ignored.
+pub(super) fn spawn_declaration_save(
+    home: &UzeHome,
+    space: SpaceId,
+    root: PathBuf,
+    sent: SentEdits,
+    sender: mpsc::Sender<DeclarationSaveResolution>,
+) {
+    let home = home.clone();
+    let parent = tracing::Span::current();
+    thread::spawn(move || {
+        let _span = tracing::info_span!(parent: &parent, "tui.declaration_save").entered();
+        let edits = sent.edits();
+        let outcome = answered_or(
+            || {
+                tui_application(home)
+                    .and_then(|app| app.workspace().apply_declaration(&root, &edits))
+                    .map_err(|error| error.to_string())
+            },
+            Err("saving failed".to_owned()),
+        );
+        let _ = sender.send(DeclarationSaveResolution {
+            space,
+            sent,
+            outcome,
+        });
+    });
+}

@@ -21,6 +21,8 @@ impl WorkspaceModel {
                 self.panes.clear();
                 self.note_strip_selection(identities);
                 self.close_extension_left_behind();
+                self.put_away_space_overview_left_behind();
+                self.forget_overviews_of_closed_spaces();
                 self.occupancy_stale = true;
             }
             ClientEvent::SessionUpdated { session } => {
@@ -29,6 +31,8 @@ impl WorkspaceModel {
                 self.note_launcher_bypass();
                 self.note_strip_selection(identities);
                 self.close_extension_left_behind();
+                self.put_away_space_overview_left_behind();
+                self.forget_overviews_of_closed_spaces();
                 self.prune_dragging_tab();
                 self.prune_dragging_space();
                 self.occupancy_stale = true;

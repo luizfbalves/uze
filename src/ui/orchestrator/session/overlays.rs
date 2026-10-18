@@ -171,84 +171,77 @@ impl Attach<'_> {
         self.model.dirty = true;
     }
 
-    /// The agent drawer: walk its prompts, switch whose prompts are
-    /// listed, or clear the space's.
-    pub(super) fn drawer_action(&mut self, action: Action) {
+    /// The overview's Agent section: walk the space's prompts, copy the one
+    /// chosen, or clear them.
+    pub(in crate::ui::orchestrator) fn drawer_action(&mut self, action: Action) {
         let listed = self.drawer_prompt_count();
         let space_has_prompts = self.space_has_prompts();
-        let Some(drawer) = self.model.support_dropdown.as_mut() else {
+        let chosen = self.chosen_prompt();
+        let Some(agent) = self.agent_panel() else {
             return;
         };
-        let clearing = std::mem::take(&mut drawer.clearing);
+        let clearing = std::mem::take(&mut agent.clearing);
         match action {
-            Action::SelectPrevious => drawer.selected = drawer.selected.saturating_sub(1),
+            Action::SelectPrevious => agent.selected = agent.selected.saturating_sub(1),
             Action::SelectNext => {
-                drawer.selected = (drawer.selected + 1).min(listed.saturating_sub(1));
+                agent.selected = (agent.selected + 1).min(listed.saturating_sub(1));
             }
-            Action::FocusNext | Action::FocusPrevious => {
-                let scope = match drawer.scope {
-                    PromptScope::Agent => PromptScope::Space,
-                    PromptScope::Space => PromptScope::Agent,
-                };
-                self.show_drawer_scope(scope);
+            // A prompt is read here to be used again: enter takes it.
+            Action::Activate => {
+                if let Some(text) = chosen {
+                    self.model.copy_selected(text);
+                }
             }
-            // The prompts are read here, not acted on: `enter` keeps the
-            // drawer open rather than closing it as if it had done something.
-            Action::Activate => {}
             Action::ClearPromptHistory if clearing => {
-                let root = drawer.space_root.clone();
+                let root = agent.space_root.clone();
                 spawn_clear_prompt_history(self.home, root, self.channels.prompts.sender.clone());
             }
-            Action::ClearPromptHistory => drawer.clearing = space_has_prompts,
-            _ => self.model.support_dropdown = None,
+            Action::ClearPromptHistory => agent.clearing = space_has_prompts,
+            _ => {}
         }
         self.model.dirty = true;
     }
 
-    /// How many prompts the open drawer lists.
-    pub(super) fn drawer_prompt_count(&self) -> usize {
-        match (
-            &self.model.support_dropdown,
-            &self.model.remembered.drawer_prompts,
-        ) {
-            (Some(drawer), Some(history)) if history.root == drawer.space_root => {
-                drawer.prompts(&history.entries).len()
-            }
-            _ => 0,
-        }
+    /// The Agent section's state, while the overview is up.
+    pub(in crate::ui::orchestrator) fn agent_panel(&mut self) -> Option<&mut AgentSupportDropdown> {
+        self.model
+            .space_overview
+            .as_mut()
+            .and_then(|overview| overview.agent.as_mut())
     }
 
-    pub(super) fn space_has_prompts(&self) -> bool {
-        match (
-            &self.model.support_dropdown,
-            &self.model.remembered.drawer_prompts,
-        ) {
-            (Some(drawer), Some(history)) => {
-                history.root == drawer.space_root && !history.entries.is_empty()
-            }
-            _ => false,
-        }
+    /// The Agent section, with the space's prompts it lists, newest first,
+    /// once the history read for its space has arrived.
+    fn listed_prompts(&self) -> Option<(&AgentSupportDropdown, &[uze_application::PromptEntry])> {
+        let agent = self.model.space_overview.as_ref()?.agent.as_ref()?;
+        let history = self.model.remembered.drawer_prompts.as_ref()?;
+        (history.root == agent.space_root).then_some((agent, history.entries.as_slice()))
     }
 
-    /// Switches whose prompts are listed. The agent's own are only
-    /// offered when UZE knows which agent this is.
-    pub(super) fn show_drawer_scope(&mut self, scope: PromptScope) {
-        if let Some(drawer) = self.model.support_dropdown.as_mut()
-            && (scope == PromptScope::Space || drawer.agent.is_some())
-        {
-            drawer.scope = scope;
-            drawer.selected = 0;
-            self.model.remembered.drawer_scope = Some(scope);
-        }
-        self.model.dirty = true;
+    /// The prompt the keys are on, as it was asked.
+    fn chosen_prompt(&self) -> Option<String> {
+        let (agent, prompts) = self.listed_prompts()?;
+        prompts
+            .get(agent.selected)
+            .map(|entry| entry.preview.clone())
     }
 
-    /// Keeps the drawer's selection on a row that is still listed after
-    /// its history was read again.
-    pub(super) fn keep_drawer_selection(&mut self) {
+    /// How many prompts the Agent section lists.
+    pub(in crate::ui::orchestrator) fn drawer_prompt_count(&self) -> usize {
+        self.listed_prompts()
+            .map_or(0, |(_, prompts)| prompts.len())
+    }
+
+    pub(in crate::ui::orchestrator) fn space_has_prompts(&self) -> bool {
+        self.drawer_prompt_count() > 0
+    }
+
+    /// Keeps the selection on a prompt that is still listed after the
+    /// history was read again.
+    pub(in crate::ui::orchestrator) fn keep_drawer_selection(&mut self) {
         let listed = self.drawer_prompt_count();
-        if let Some(drawer) = self.model.support_dropdown.as_mut() {
-            drawer.selected = drawer.selected.min(listed.saturating_sub(1));
+        if let Some(agent) = self.agent_panel() {
+            agent.selected = agent.selected.min(listed.saturating_sub(1));
         }
     }
 

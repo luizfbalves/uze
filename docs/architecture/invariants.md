@@ -432,7 +432,7 @@ overrides).
 
 > `src/progress.rs::tests::only_this_module_s_painting_reaches_the_terminal`
 > `src/cli/output.rs::tests::json_output_carries_no_raw_terminal_control`
-> `src/ui/orchestrator/tests.rs::a_bidi_override_never_reaches_the_terminal`
+> `src/ui/orchestrator/tests/drawing.rs::a_bidi_override_never_reaches_the_terminal`
 > `tests/architecture/layering.rs::every_frame_reaches_the_terminal_through_one_session`
 
 Consent is not inherited across an update. A revision introducing execution
@@ -748,8 +748,8 @@ line invisibly — history recall, completion, an escape, a control chord —
 discards the reconstruction instead of persisting a prompt the user never
 typed. The history is a navigation aid, never a record of a session.
 
-> `src/ui/orchestrator/tests.rs::prompt_buffer_tests::history_recall_discards_the_reconstruction`
-> `src/ui/orchestrator/tests.rs::prompt_buffer_tests::a_control_or_alt_chord_discards_the_reconstruction`
+> `src/ui/orchestrator/tests/prompt_buffer.rs::history_recall_discards_the_reconstruction`
+> `src/ui/orchestrator/tests/prompt_buffer.rs::a_control_or_alt_chord_discards_the_reconstruction`
 
 ### Prompt text is owner-only, workspace-scoped, and deletable
 
@@ -760,15 +760,6 @@ another's entries, the file and its directory are `0600`/`0700`, and
 > `crates/uze-workspace/src/prompt_history.rs::tests::history_is_owner_only`
 > `crates/uze-workspace/src/prompt_history.rs::tests::each_workspace_keeps_its_own_history`
 > `crates/uze-workspace/src/prompt_history.rs::tests::clear_removes_only_the_named_workspace_and_tolerates_absence`
-
-### An agent's prompts are matched on the agent, never on its tab
-
-The terminal runtime mints tab ids again when it restores a workspace, so a
-tab id names different agents on either side of a restart. Each entry
-records the agent UZE launched in the tab, and the drawer's "this agent"
-listing matches on that alone.
-
-> `src/ui/orchestrator/tests.rs::drawer_tests::an_agents_prompts_are_its_own_whatever_tab_ids_were_reused`
 
 ---
 
@@ -801,8 +792,8 @@ they are driven from every mention of the host is inside a
 > `tests/architecture/layering.rs::architecture_rules_hold` ("drawing the workspace reaches nothing")
 > `tests/architecture/layering.rs::architecture_rules_hold` ("drawing the workspace reaches nothing, by any name")
 > `tests/architecture/layering.rs::the_workspace_client_reaches_for_git_only_from_a_thread`
-> `src/ui/orchestrator/tests.rs::workspace_tests::scheduling_a_git_read_reserves_the_checkout_and_answers_nothing`
-> `src/ui/orchestrator/tests.rs::workspace_tests::discarding_a_preserved_task_is_asked_for_rather_than_done_on_the_keystroke`
+> `src/ui/orchestrator/tests/timeline.rs::scheduling_a_git_read_reserves_the_checkout_and_answers_nothing`
+> `src/ui/orchestrator/tests/tasks.rs::discarding_a_preserved_task_is_asked_for_rather_than_done_on_the_keystroke`
 > `crates/uze-extensions/src/code/tests.rs::selecting_a_file_asks_for_its_diff_rather_than_reading_it`
 
 ### An answer that arrives late is dropped, never drawn
@@ -813,8 +804,8 @@ question the viewer has since moved past releases its key and is
 discarded; it is not wrong, it is no longer what is being asked. This is
 what makes an unbounded read safe to start from a keystroke.
 
-> `src/ui/orchestrator/tests.rs::workspace_tests::a_git_answer_for_another_checkout_is_released_and_dropped`
-> `src/ui/orchestrator/tests.rs::workspace_tests::a_commit_account_arrives_only_for_the_row_last_clicked`
+> `src/ui/orchestrator/tests/timeline.rs::a_git_answer_for_another_checkout_is_released_and_dropped`
+> `src/ui/orchestrator/tests/timeline.rs::a_commit_account_arrives_only_for_the_row_last_clicked`
 
 ### Every background read answers, and the answer is what releases its key
 
@@ -827,8 +818,8 @@ every spawned read answers on every path, and the work is run so that a
 panic still produces the "nothing found" answer the absorber already
 draws.
 
-> `src/ui/orchestrator/tests.rs::workspace_tests::a_delivery_that_answered_nothing_still_gives_the_task_back`
-> `src/ui/orchestrator/tests.rs::workspace_tests::a_terminal_runtime_that_went_away_is_said_rather_than_waited_on`
+> `src/ui/orchestrator/tests/delivery.rs::a_delivery_that_answered_nothing_still_gives_the_task_back`
+> `src/ui/orchestrator/tests/attach.rs::a_terminal_runtime_that_went_away_is_said_rather_than_waited_on`
 
 ### An extension describes every surface it has, including a sidebar section
 
@@ -841,7 +832,7 @@ hits come back as `ExtensionHit` — one variant per surface, so
 "row 3 was clicked" cannot be confused between a file list and a list of
 commits.
 
-> `src/ui/orchestrator/tests.rs::workspace_tests::the_timeline_speaks_only_the_extensions_vocabulary`
+> `src/ui/orchestrator/tests/timeline.rs::the_timeline_speaks_only_the_extensions_vocabulary`
 > `crates/uze-extensions/src/code/tests.rs::the_timeline_section_names_meaning_rather_than_colour`
 
 ### Slot lifecycle is the application's, not the client's
@@ -1309,7 +1300,7 @@ never a fallback.
 > `crates/uze-application/src/application/services/tasks/tests.rs::placement_tests::three_agents_get_three_distinct_checkouts_and_none_is_the_primary`
 > `crates/uze-application/src/application/services/tasks/tests.rs::placement_tests::the_operators_uncommitted_work_survives_agents_launching`
 > `crates/uze-application/src/application/services/tasks/tests.rs::placement_tests::a_repository_without_a_commit_refuses_a_slot_and_starts_nothing`
-> `src/ui/orchestrator/tests.rs::workspace_tests::an_agent_in_a_slot_is_left_unmarked_and_says_where_nowhere`
+> `src/ui/orchestrator/tests/agents.rs::an_agent_in_a_slot_is_left_unmarked_and_says_where_nowhere`
 
 ### A project's commands run only once the operator approved those exact lines (ADR-055)
 
@@ -1334,7 +1325,7 @@ controls written out.
 > `crates/uze-application/src/application/services/tasks/tests.rs::task_service_tests::an_unapproved_setup_waits_and_approving_it_prepares_the_checkout`
 > `tests/acceptance/command_approval.rs::an_agent_cannot_approve_its_projects_commands`
 > `tests/acceptance/command_approval.rs::approving_needs_a_person_at_a_terminal`
-> `src/ui/orchestrator/tests.rs::workspace_tests::only_the_operators_yes_approves_a_projects_commands`
+> `src/ui/orchestrator/tests/approval.rs::only_the_operators_yes_approves_a_projects_commands`
 
 ### An agent in the root never acquires a slot and never creates a branch (`add-space-kinds`)
 
@@ -1521,10 +1512,10 @@ in memory and overwritten by the outcome before the store is saved, so no
 evaluation can read it back, and the client that started the delivery is the
 only party that knows one is running.
 
-> `src/ui/orchestrator/tests.rs::workspace_tests::a_published_task_is_marked_as_gone_not_as_waiting_to_be_delivered`
-> `src/ui/orchestrator/tests.rs::workspace_tests::a_delivery_in_flight_is_drawn_from_the_client_that_started_it`
-> `src/ui/orchestrator/tests.rs::workspace_tests::a_branch_level_with_its_request_reports_the_sync_instead_of_a_count`
-> `src/ui/orchestrator/tests.rs::workspace_tests::work_in_review_shows_its_request_number_and_no_mark`
+> `src/ui/orchestrator/tests/delivery.rs::a_published_task_is_marked_as_gone_not_as_waiting_to_be_delivered`
+> `src/ui/orchestrator/tests/delivery.rs::a_delivery_in_flight_is_drawn_from_the_client_that_started_it`
+> `src/ui/orchestrator/tests/delivery.rs::a_branch_level_with_its_request_reports_the_sync_instead_of_a_count`
+> `src/ui/orchestrator/tests/delivery.rs::work_in_review_shows_its_request_number_and_no_mark`
 
 ### Only a checkout UZE recorded making is ever reset, reused or removed (`account-for-every-checkout`)
 
@@ -1814,11 +1805,11 @@ does nothing.
 > `crates/uze-workspace/src/declaration.rs::tests::an_unknown_state_or_an_empty_instruction_is_left_out_and_named`
 > `crates/uze-workspace/src/declaration.rs::tests::actions_alone_declare_no_policy_and_none_declared_is_empty`
 > `crates/uze-application/src/application/services/tasks/tests.rs::task_service_tests::the_view_carries_the_instruction_its_state_answers_to`
-> `src/ui/orchestrator/tests.rs::workspace_tests::a_delivery_sends_the_instruction_of_the_state_it_left`
-> `src/ui/orchestrator/tests.rs::workspace_tests::a_click_on_an_answered_status_sends_its_instruction_once`
-> `src/ui/orchestrator/tests.rs::workspace_tests::a_click_on_ready_work_delivers_it`
-> `src/ui/orchestrator/tests.rs::workspace_tests::a_click_on_a_report_does_nothing`
-> `src/ui/orchestrator/tests.rs::workspace_tests::uncommitted_work_shows_a_status_only_when_the_project_asks_something_there`
+> `src/ui/orchestrator/tests/delivery.rs::a_delivery_sends_the_instruction_of_the_state_it_left`
+> `src/ui/orchestrator/tests/delivery.rs::a_click_on_an_answered_status_sends_its_instruction_once`
+> `src/ui/orchestrator/tests/delivery.rs::a_click_on_ready_work_delivers_it`
+> `src/ui/orchestrator/tests/delivery.rs::a_click_on_a_report_does_nothing`
+> `src/ui/orchestrator/tests/delivery.rs::uncommitted_work_shows_a_status_only_when_the_project_asks_something_there`
 
 ### A delivery never collides with the operator's own edits
 
@@ -1935,7 +1926,7 @@ nothing when none is. A home space someone creates deliberately is still
 theirs, and still what the next launch from home lands on.
 
 > `crates/uze-terminal/src/runtime/tests.rs::only_asking_to_open_a_space_may_create_one`
-> `src/ui/orchestrator/tests.rs::starting_at_home_lands_in_the_workspace_rather_than_adding_to_it`
+> `src/ui/orchestrator/tests/context_menu.rs::starting_at_home_lands_in_the_workspace_rather_than_adding_to_it`
 
 ### Focus is per client
 
@@ -2010,7 +2001,7 @@ the only way back in short of a manual `kill`.
 
 > `crates/uze-terminal/src/runtime/tests.rs::a_client_an_event_cannot_reach_is_disconnected_rather_than_frozen`
 > `crates/uze-terminal/src/runtime/tests.rs::stop_is_heard_as_a_first_frame_by_a_server_nobody_attached_to`
-> `src/ui/orchestrator/tests.rs::workspace_tests::a_terminal_runtime_that_went_away_is_said_rather_than_waited_on`
+> `src/ui/orchestrator/tests/attach.rs::a_terminal_runtime_that_went_away_is_said_rather_than_waited_on`
 
 ### Liveness is the workspace claim; the kernel names the peer
 
@@ -2144,8 +2135,8 @@ framed as a paste where the pane asked for one, and is never sent into an
 agent mid-turn or on top of text the operator typed.
 
 > `src/ui/orchestrator/input.rs::tests::a_notice_reaches_a_pane_as_text_and_one_submission`
-> `src/ui/orchestrator/tests.rs::workspace_tests::an_instruction_is_refused_over_text_the_operator_typed`
-> `src/ui/orchestrator/tests.rs::workspace_tests::an_automatic_send_into_a_busy_agent_is_held_back`
+> `src/ui/orchestrator/tests/delivery.rs::an_instruction_is_refused_over_text_the_operator_typed`
+> `src/ui/orchestrator/tests/delivery.rs::an_automatic_send_into_a_busy_agent_is_held_back`
 
 ### An agent is its launch, not its identifier
 
@@ -2272,7 +2263,7 @@ it, because a machine fact reaches every agent in every project.
 > `crates/uze-core/src/project/memory/tests.rs::a_fact_round_trips_through_its_document`
 > `crates/uze-core/src/project/memory/tests.rs::a_proposal_reaches_no_index_until_it_is_accepted`
 > `crates/uze-application/src/application/memory/tests.rs::a_proposed_machine_fact_reaches_no_agent_until_accepted`
-> `src/ui/orchestrator/tests.rs::only_the_operators_accept_keeps_a_proposed_fact`
+> `src/ui/orchestrator/tests/approval.rs::only_the_operators_accept_keeps_a_proposed_fact`
 
 ### A harness's own memory is read, never written; each agent is told one way to remember
 
@@ -2439,8 +2430,8 @@ directory under another name, and the work still lands in it.
 
 > `crates/uze-application/src/application/services/tasks/tests.rs::task_service_tests::work_is_found_in_a_project_this_session_never_opened`
 > `crates/uze-application/src/application/services/tasks/tests.rs::task_service_tests::two_projects_sharing_a_branch_name_stay_distinguishable`
-> `src/ui/orchestrator/tests.rs::workspace_tests::a_space_is_matched_by_its_root_whatever_it_is_called`
-> `src/ui/orchestrator/tests.rs::workspace_tests::a_space_rooted_above_the_project_does_not_match_it`
+> `src/ui/orchestrator/tests/tasks.rs::a_space_is_matched_by_its_root_whatever_it_is_called`
+> `src/ui/orchestrator/tests/tasks.rs::a_space_rooted_above_the_project_does_not_match_it`
 
 ### Recent lists agents, and offers only what moves each one on
 
@@ -2629,9 +2620,9 @@ because index 2 is *green* to whatever emitted it.
 > `src/theme.rs::a_themes_own_symbol_wins_over_the_selected_set`
 > `src/theme.rs::the_operators_overrides_win_over_the_set_and_the_theme_both`
 > `crates/uze-core/src/appearance.rs::the_two_choices_do_not_overwrite_each_other`
-> `src/ui/tests.rs::each_glyph_set_is_previewed_in_its_own_glyphs`
+> `src/ui/tests/settings.rs::each_glyph_set_is_previewed_in_its_own_glyphs`
 > `src/progress.rs::the_cli_and_the_tui_resolve_a_shared_token_to_the_same_colour`
-> `src/ui/orchestrator/tests.rs::the_palette_a_pane_is_told_about_is_the_one_being_drawn`
+> `src/ui/orchestrator/tests/drawing.rs::the_palette_a_pane_is_told_about_is_the_one_being_drawn`
 > `crates/uze-terminal/src/runtime/tests.rs::osc_background_and_foreground_queries_get_answered_instead_of_hanging`
 
 ### An extension describes; the host draws
@@ -2868,7 +2859,7 @@ same list. A build where three of them agree and the fourth still offers a
 way in is the failure mode a runtime flag has in place of a compile error,
 so it is the one this guards.
 
-> `src/ui/tests.rs::a_screen_behind_a_feature_is_absent_or_whole`
+> `src/ui/tests/navigation.rs::a_screen_behind_a_feature_is_absent_or_whole`
 
 ## Decisions deliberately *not* taken
 
@@ -2977,7 +2968,7 @@ hand-typed list this replaced had already fallen out of step with the
 dispatcher for nine of its bindings.
 
 > `tests/architecture/layering.rs::architecture_rules_hold` (rules: *no surface writes a key down*, *no surface draws its own arrow keys*)
-> `src/ui/tests.rs::a_hint_line_reads_its_keys_off_the_keymap`
+> `src/ui/widget/hint.rs::a_hint_line_reads_its_keys_off_the_keymap`
 
 ### Every chord has something to click; not every control needs a chord
 
@@ -3011,7 +3002,7 @@ contextual. A keymap that breaks this is refused rather than resolved by
 order, which is what retired `r` meaning both *remove* and *refresh*.
 
 > `uze-keys::keymap::tests::one_chord_names_one_action_within_a_keyboard`
-> `src/ui/tests.rs::a_letter_names_one_action_and_refreshing_has_its_own`
+> `src/ui/tests/marketplaces.rs::a_letter_names_one_action_and_refreshing_has_its_own`
 
 ### A question is answered with the arrows and enter
 
@@ -3021,9 +3012,9 @@ between them, enter takes the one the keyboard is on, esc withdraws it,
 and no letter answers it: a second, invisible way to say yes is a key
 pressed by habit on the wrong question.
 
-> `src/ui/tests.rs::remove_confirmation_flow`
-> `src/ui/tests.rs::the_arrows_choose_an_answer_and_enter_takes_it`
-> `src/ui/orchestrator/tests.rs::discarding_a_preserved_task_is_asked_for_rather_than_done_on_the_keystroke`
+> `src/ui/tests/plugins.rs::remove_confirmation_flow`
+> `src/ui/tests/overlays.rs::the_arrows_choose_an_answer_and_enter_takes_it`
+> `src/ui/orchestrator/tests/tasks.rs::discarding_a_preserved_task_is_asked_for_rather_than_done_on_the_keystroke`
 > `src/ui/orchestrator/tests/recent.rs::a_question_opens_on_its_way_out_and_the_arrow_reaches_going_ahead`
 
 ### A move with no key is still reachable from the keyboard
@@ -3057,7 +3048,7 @@ loads.
 > `uze-keys::load::tests::a_file_that_cannot_be_used_leaves_the_keyboard_alone`
 > `uze-keys::load::tests::a_keymap_written_for_a_newer_uze_still_loads`
 > `src/keymap.rs::tests::a_file_that_would_take_the_keyboard_away_says_so_and_changes_nothing`
-> `src/ui/tests.rs::a_key_this_terminal_cannot_send_is_never_bound`
+> `src/ui/tests/keys.rs::a_key_this_terminal_cannot_send_is_never_bound`
 
 ### What can be done to a thing is answered once
 
@@ -3066,8 +3057,8 @@ buttons and the index both read that one list. A detail view draws a button
 for what can be done now and for nothing else.
 
 > `uze-application::application::offers::tests::an_action_that_cannot_run_says_why_rather_than_doing_nothing`
-> `src/ui/tests.rs::every_drawer_draws_what_its_row_can_do_as_buttons`
-> `src/ui/tests.rs::the_drawer_offers_what_can_be_done_as_buttons`
+> `src/ui/tests/layout.rs::every_drawer_draws_what_its_row_can_do_as_buttons`
+> `src/ui/tests/plugins.rs::the_drawer_offers_what_can_be_done_as_buttons`
 
 ---
 

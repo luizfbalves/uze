@@ -8,15 +8,18 @@ import { CastHandle, CastPlayer } from '@/components/cast-player';
 // beat, in seconds of the cast: a new take means reading these off the new
 // cut.
 const CAST = '/casts/landing.cast';
+// Its header's width and height: the frame holds this shape before it plays.
+const SIZE = { cols: 140, rows: 36 };
 const CHAPTERS: { label: string; at: number }[] = [
   { label: 'open the workspace', at: 0 },
-  { label: 'add a plugin', at: 4 },
-  { label: 'agents side by side', at: 16.7 },
-  { label: 'review and deliver', at: 41.4 },
-  { label: 'pick up anywhere', at: 58 },
+  { label: 'add a plugin', at: 3.8 },
+  { label: 'agents side by side', at: 14.3 },
+  { label: 'review and deliver', at: 43.6 },
+  { label: 'pick up anywhere', at: 61.5 },
 ];
-// Three agents named, each in its own worktree, and Claude's commit.
-const POSTER_AT = 39.7;
+// Three agents named, each in its own worktree, and the code surface on
+// the change OpenCode left uncommitted.
+const POSTER_AT = 49.5;
 const FRAME_WIDTH = 'min(calc((100svh - 16rem) * 1.89), calc(100vw - 4rem), 1600px)';
 
 export function HeroRecording() {
@@ -64,6 +67,7 @@ export function HeroRecording() {
           <CastPlayer
             src={CAST}
             posterAt={POSTER_AT}
+            size={SIZE}
             handle={player}
             label="A terminal session recorded with the real uze: uze workspace opens; in its shell, uze market add hiukky/ai adds a marketplace, uze git@ai installs the git plugin and uze inspect git shows what Claude Code, Codex, OpenCode and Antigravity each received; agents on Claude Code, Codex and OpenCode then work side by side, each in a worktree of its own; spec, arch and code open on one, while Claude commits through the plugin skill and is delivered to main; the OpenCode agent then continues in Claude Code, is closed, found in Recent and resumed, and the management screens are shown."
           />

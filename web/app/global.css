@@ -311,6 +311,23 @@ html > body[data-scroll-locked] {
     transform: translateY(-10px) rotate(calc(var(--tilt, 0deg) * 0.6));
   }
 }
+/* What a tile holds changes while the tile stays: the outgoing face sinks
+   and blurs as the next one rises into focus, each tile a beat after the one
+   before it so the change travels around the claim instead of blinking. */
+.orbit-face {
+  opacity: 0;
+  scale: 0.6;
+  filter: blur(6px);
+  transition:
+    opacity 520ms ease,
+    scale 620ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    filter 520ms ease;
+}
+.orbit-face[data-active='true'] {
+  opacity: 1;
+  scale: 1;
+  filter: blur(0);
+}
 @media (prefers-reduced-motion: reduce) {
   .harness-float {
     animation: none;
@@ -340,13 +357,13 @@ figure.shiki {
 */
 @font-face {
   font-family: 'Uze Terminal';
-  src: url('/fonts/FiraCodeNerdMono-Regular.subset.woff2') format('woff2');
+  src: url('/fonts/FiraCodeNerdMono-Regular.subset.woff2?v=47aa6875ddc1') format('woff2');
   font-weight: 400;
   font-display: swap;
 }
 @font-face {
   font-family: 'Uze Terminal';
-  src: url('/fonts/FiraCodeNerdMono-Bold.subset.woff2') format('woff2');
+  src: url('/fonts/FiraCodeNerdMono-Bold.subset.woff2?v=74df144ee35e') format('woff2');
   font-weight: 700;
   font-display: swap;
 }
@@ -386,4 +403,23 @@ html.dark .cast-frame {
   border-inline-end: 0;
   padding-inline-end: 0;
   margin-inline-end: 0;
+}
+
+/* How long a take on the home page has left before the next one. */
+.take-progress {
+  animation: take-progress linear forwards;
+}
+@keyframes take-progress {
+  from {
+    scale: 0 1;
+  }
+  to {
+    scale: 1 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .take-progress {
+    animation: none;
+    scale: 1 1;
+  }
 }

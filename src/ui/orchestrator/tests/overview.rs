@@ -316,6 +316,8 @@ fn a_long_memory_section_scrolls_with_a_scrollbar_and_the_wheel() {
             updated: None,
             writable: true,
             proposed: false,
+            cites: Vec::new(),
+            missing: Vec::new(),
         })
         .collect();
     let overview = model.space_overview.as_mut().expect("the overview is open");
@@ -416,6 +418,8 @@ fn the_memory_search_narrows_the_facts_and_reads_the_one_selected() {
         updated: None,
         writable: true,
         proposed: false,
+        cites: Vec::new(),
+        missing: Vec::new(),
     };
     let overview = model.space_overview.as_mut().expect("the overview is open");
     overview.section = crate::ui::orchestrator::space_overview::Section::Memory;
@@ -501,6 +505,8 @@ fn machine_facts_are_listed_beside_the_projects() {
         updated: None,
         writable: true,
         proposed: false,
+        cites: Vec::new(),
+        missing: Vec::new(),
     };
     let overview = model.space_overview.as_mut().expect("the overview is open");
     overview.section = crate::ui::orchestrator::space_overview::Section::Memory;
@@ -549,6 +555,8 @@ fn memory_facts_are_listed_newest_first() {
         updated: updated.map(str::to_owned),
         writable: true,
         proposed: false,
+        cites: Vec::new(),
+        missing: Vec::new(),
     };
     let overview = model.space_overview.as_mut().expect("the overview is open");
     overview.answer = Some(Ok(project_space(
@@ -597,6 +605,8 @@ fn a_fact_body_is_drawn_as_markdown() {
                 updated: None,
                 writable: false,
                 proposed: false,
+                cites: Vec::new(),
+                missing: Vec::new(),
             }],
             ..Default::default()
         },
@@ -613,6 +623,228 @@ fn a_fact_body_is_drawn_as_markdown() {
     assert!(
         !screen.contains("**Why"),
         "the emphasis is spelled out:\n{screen}"
+    );
+}
+
+/// The overview open on its Memory section, its drawer standing over the
+/// section, listing a fact per name.
+fn memory_overview(names: &[&str]) -> WorkspaceModel {
+    use uze_application::application::memory::{Entry, Kind, MemoryScope};
+    let session = session("/repo");
+    let space = session.selected_space().id;
+    let behind = session.selected_tab().id;
+    let mut model = model_of(session);
+    model.open_space_overview(space, behind, true);
+    let facts = names
+        .iter()
+        .map(|name| Entry {
+            name: (*name).to_owned(),
+            description: String::new(),
+            kind: Kind::Feedback,
+            scope: MemoryScope::Project,
+            origin: "uze".to_owned(),
+            source: None,
+            path: PathBuf::from(format!("/facts/{name}.md")),
+            updated: None,
+            writable: true,
+            proposed: false,
+            cites: Vec::new(),
+            missing: Vec::new(),
+        })
+        .collect();
+    let overview = model.space_overview.as_mut().expect("the overview is open");
+    overview.section = crate::ui::orchestrator::space_overview::Section::Memory;
+    overview.answer = Some(Ok(project_space(
+        uze_application::SpaceMemory {
+            project: facts,
+            ..Default::default()
+        },
+        Err("not read here".to_owned()),
+    )));
+    overview.drawer = true;
+    model
+}
+
+/// A body of `count` numbered lines, each its own paragraph.
+fn long_body(count: usize) -> String {
+    (0..count)
+        .map(|line| format!("body-line-{line:02}"))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn drawer_rect(driven: &Driven<'_>) -> Rect {
+    driven
+        .attach
+        .model
+        .hits
+        .iter()
+        .find(|(_, hit)| *hit == WorkspaceHit::OverviewDrawer)
+        .map(|(rect, _)| *rect)
+        .expect("the drawer's text is a target")
+}
+
+/// A fact's body longer than the drawer scrolls: its handle is drawn, the
+/// wheel over the drawer reaches the last line, and the way back up costs
+/// only what the text has, not the notches spent past its end.
+#[test]
+fn a_long_fact_body_scrolls_to_its_last_line_in_the_drawer() {
+    let home = UzeHome::at(uze_testkit::temp::scratch("orchestrator-overview-drawer"));
+    let mut model = memory_overview(&["long-fact"]);
+    model.space_overview.as_mut().expect("open").fact =
+        Some(("long-fact".to_owned(), Some(Ok(long_body(30)))));
+
+    let rows = frame_rows(&mut model);
+    let thumb = theme::glyph(crate::ui::theme::Symbol::ScrollThumb);
+    assert!(
+        rows.iter().any(|row| row.contains(thumb.as_str())),
+        "a body longer than the drawer drew no scrollbar:\n{}",
+        rows.join("\n")
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains("body-line-29")),
+        "the body's last line is on screen before scrolling"
+    );
+
+    let mut driven = driven(model, &home);
+    driven.frame();
+    let drawer = drawer_rect(&driven);
+    for _ in 0..40 {
+        driven.mouse(drawer.x + 1, drawer.y + 1, MouseEventKind::ScrollDown);
+    }
+    let rows = frame_rows(&mut driven.attach.model);
+    assert!(
+        rows.iter().any(|row| row.contains("body-line-29")),
+        "the wheel did not reach the body's last line:\n{}",
+        rows.join("\n")
+    );
+    let memory = crate::ui::orchestrator::space_overview::Section::Memory.index();
+    let overview = driven.attach.model.space_overview.as_ref().expect("open");
+    assert_eq!(overview.rows[memory], 0, "the wheel moved the selection");
+
+    driven.frame();
+    for _ in 0..6 {
+        driven.press_key(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::PageUp,
+        ));
+    }
+    let rows = frame_rows(&mut driven.attach.model);
+    assert!(
+        rows.iter().any(|row| row.contains("memory · read-only")),
+        "page up did not bring the drawer back to its top:\n{}",
+        rows.join("\n")
+    );
+}
+
+/// The drawer is read from its top on every row it is opened on: the
+/// next row, the same row come back to, and another section.
+#[test]
+fn choosing_another_row_reads_the_drawer_from_its_top() {
+    let home = UzeHome::at(uze_testkit::temp::scratch(
+        "orchestrator-overview-drawer-reset",
+    ));
+    let mut model = memory_overview(&["first-fact", "second-fact"]);
+    model.space_overview.as_mut().expect("open").fact =
+        Some(("first-fact".to_owned(), Some(Ok(long_body(30)))));
+    let mut driven = driven(model, &home);
+    let key = |code| crossterm::event::KeyEvent::from(code);
+    let scrolled = |driven: &Driven<'_>| {
+        driven
+            .attach
+            .model
+            .space_overview
+            .as_ref()
+            .expect("open")
+            .drawer_scroll()
+    };
+
+    driven.frame();
+    driven.press_key(key(crossterm::event::KeyCode::PageDown));
+    driven.frame();
+    assert!(scrolled(&driven) > 0, "page down did not scroll the drawer");
+
+    driven.press_key(key(crossterm::event::KeyCode::Down));
+    driven.frame();
+    assert_eq!(scrolled(&driven), 0, "the next row opened scrolled");
+    driven.press_key(key(crossterm::event::KeyCode::Up));
+    driven.frame();
+    assert_eq!(scrolled(&driven), 0, "the row come back to opened scrolled");
+
+    driven
+        .attach
+        .model
+        .space_overview
+        .as_mut()
+        .expect("open")
+        .fact = Some(("first-fact".to_owned(), Some(Ok(long_body(30)))));
+    driven.frame();
+    driven.press_key(key(crossterm::event::KeyCode::PageDown));
+    driven.frame();
+    assert!(scrolled(&driven) > 0, "page down did not scroll the drawer");
+    driven.press_key(key(crossterm::event::KeyCode::Right));
+    driven.press_key(key(crossterm::event::KeyCode::Left));
+    driven.frame();
+    assert_eq!(
+        scrolled(&driven),
+        0,
+        "another section left the drawer scrolled"
+    );
+}
+
+/// On a terminal too narrow for the drawer beside the section, the drawer
+/// is opened by Enter, and opens at its top whatever the page keys did
+/// while it was closed.
+#[test]
+fn a_drawer_opened_reads_from_its_top_after_page_keys_while_closed() {
+    let home = UzeHome::at(uze_testkit::temp::scratch(
+        "orchestrator-overview-drawer-closed",
+    ));
+    let mut model = memory_overview(&["long-fact"]);
+    model.space_overview.as_mut().expect("open").drawer = false;
+    let mut driven = driven(model, &home);
+    let key = |code| crossterm::event::KeyEvent::from(code);
+    driven.press_key(key(crossterm::event::KeyCode::PageDown));
+    driven.press_key(key(crossterm::event::KeyCode::Enter));
+    let overview = driven.attach.model.space_overview.as_ref().expect("open");
+    assert!(overview.drawer, "Enter opened the drawer");
+    assert_eq!(overview.drawer_scroll(), 0, "the drawer opened scrolled");
+}
+
+/// A fact citing what the checkout lacks is marked in the Memory tab, and
+/// its drawer says which paths; a fact citing nothing carries no mark.
+#[test]
+fn a_fact_citing_what_the_checkout_lacks_is_marked_in_the_tab_and_the_drawer() {
+    let mut model = memory_overview(&["moved-file", "still-there"]);
+    let overview = model.space_overview.as_mut().expect("open");
+    if let Some(Ok(uze_application::SpaceOverview::Project(project))) = overview.answer.as_mut() {
+        project.memory.project[0].missing = vec!["crates/a/gone.rs".to_owned()];
+    }
+    overview.drawer = false;
+    let mark = theme::glyph(crate::ui::theme::Symbol::MarkAttention);
+    let rows = frame_rows(&mut model);
+    let screen = rows.join("\n");
+    assert!(
+        rows.iter()
+            .any(|row| row.contains(&format!("{mark} moved-file"))),
+        "the stale fact is not marked:\n{screen}"
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row.contains(&format!("{mark} still-there"))),
+        "a fact citing nothing is marked:\n{screen}"
+    );
+
+    let overview = model.space_overview.as_mut().expect("open");
+    overview.drawer = true;
+    // The mark sits under the fact's details, past a drawer this short:
+    // scrolled to its end, which the frame settles on its last screenful.
+    overview.scroll_drawer(i16::MAX);
+    let screen = frame_rows(&mut model).join("\n");
+    assert!(
+        screen.contains("cites what this checkout does not have")
+            && screen.contains("crates/a/gone.rs"),
+        "the drawer does not name the missing path:\n{screen}"
     );
 }
 
@@ -1416,6 +1648,8 @@ fn the_overview_drawer_resizes_and_carries_the_scroll_handle() {
             updated: None,
             writable: true,
             proposed: false,
+            cites: Vec::new(),
+            missing: Vec::new(),
         })
         .collect();
     let overview = model.space_overview.as_mut().expect("the overview is open");

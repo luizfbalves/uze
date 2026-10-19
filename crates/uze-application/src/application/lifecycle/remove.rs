@@ -133,9 +133,10 @@ pub(crate) enum ReceiptTeardown {
         report: ReconciliationReport,
         plan: PackageRemovalPlan,
     },
-    /// Every artifact the receipts own is gone, verified by `final_report` —
-    /// which is what the ledger may be forgotten against, never the snapshot
-    /// taken before detaching.
+    /// Every artifact the receipts own is gone. A receipt whose detach
+    /// reported it gone is already forgotten; `final_report` re-inspects the
+    /// rest — those already missing before detaching — and is what they may
+    /// be forgotten against, never the snapshot taken before detaching.
     Detached {
         detached_receipts: Vec<String>,
         already_missing_receipts: Vec<String>,
@@ -145,10 +146,13 @@ pub(crate) enum ReceiptTeardown {
 
 impl UzeApplication {
     /// Detaches every artifact `package_id`'s receipts own, only when all of
-    /// them reconcile as safe to remove. Leaves the ledger alone: whether a
-    /// receipt that failed to be forgotten is an error is the caller's call.
+    /// them reconcile as safe to remove. Forgets each receipt its detach
+    /// reported gone, and leaves the rest of the ledger alone: whether one
+    /// already missing that fails to be forgotten is an error is the
+    /// caller's call.
     ///
-    /// `Err` only when an integration fails to detach.
+    /// `Err` only when an integration fails to detach, or the ledger fails
+    /// to forget a receipt whose detach succeeded.
     pub(crate) fn detach_owned_receipts(&self, package_id: &str) -> Result<ReceiptTeardown> {
         let report = self.reconcile(package_id);
         let (detachable_receipts, already_missing_receipts) = match plan_remove(&report) {
@@ -206,12 +210,17 @@ impl UzeApplication {
                     let parent = parent.clone();
                     scope.spawn(move || {
                         parent.in_scope(|| {
+                            // Forgotten as soon as it is gone: a detach
+                            // may rebuild a file its siblings share from the
+                            // receipts still in the ledger, and a sibling
+                            // detached but still recorded reads as drift.
                             for receipt in receipts {
                                 if integration.detach_receipt(receipt)?.state
                                     != AttachmentState::Missing
                                 {
                                     return Ok(false);
                                 }
+                                state::forget_receipt(&self.home, receipt)?;
                             }
                             Ok(true)
                         })
@@ -232,24 +241,7 @@ impl UzeApplication {
                 .collect()
         });
         if detached.iter().any(|gone| !matches!(gone, Ok(true))) {
-            // Every harness was asked, so every answer counts: a harness
-            // that finished has nothing left for its receipts to own, and
-            // they are forgotten however the others ended.
-            let mut first_error = None;
-            for ((_, receipts), gone) in by_harness.iter().zip(detached) {
-                match gone {
-                    Ok(true) => {
-                        for receipt in receipts {
-                            state::forget_receipt(&self.home, receipt)?;
-                        }
-                    }
-                    Ok(false) => {}
-                    Err(error) => {
-                        first_error.get_or_insert(error);
-                    }
-                }
-            }
-            if let Some(error) = first_error {
+            if let Some(error) = detached.into_iter().find_map(Result::err) {
                 return Err(error);
             }
             let report = self.reconcile(package_id);

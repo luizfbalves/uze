@@ -275,15 +275,14 @@ fn install_project_environment_is_a_no_op_once_everything_is_installed() {
     );
 }
 
-/// `uze install` leaves the project context reconciled — declaring an
-/// environment and projecting it are one command. A projection that could
-/// not be written was reported as `NoChanges`, which reads as "everything
-/// already agrees", while the half of the environment the agents actually
-/// read had not moved at all.
+/// `uze install` takes out what an earlier release wrote into `AGENTS.md`.
+/// A cleanup that could not be written was reported as `NoChanges`, which
+/// reads as "everything already agrees", while the old text stayed where
+/// the agents read it.
 // Unix file modes, which Windows does not keep.
 #[cfg(unix)]
 #[test]
-fn install_reports_a_projection_it_could_not_write_instead_of_no_changes() {
+fn install_reports_a_cleanup_it_could_not_write_instead_of_no_changes() {
     use std::os::unix::fs::PermissionsExt;
     let fx = Fixture::new("install-projection-failed");
     fx.add_marketplace_to_global_registry();
@@ -301,22 +300,28 @@ fn install_reports_a_projection_it_could_not_write_instead_of_no_changes() {
         .install(&fx.project_root, &AlwaysTrust)
         .unwrap();
 
-    // A projection that is behind — the package manager's own region is
-    // gone from the shared file — and an installed package whose bytes the
-    // projection is composed from cannot be read.
-    fs::write(fx.project_root.join("AGENTS.md"), "").unwrap();
-    let unreadable = fx
-        .uze_home
-        .join("store/plugins/test-market/flow/skills/uze-e2e/SKILL.md");
-    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+    // An earlier release's region is still in the shared file, for install
+    // to remove, and the project's directory cannot be written.
+    let agents_md = fx.project_root.join("AGENTS.md");
+    fs::write(&agents_md, "").unwrap();
+    let body = "## Authoring plugins\n\n- old text\n";
+    let identity = format!(
+        "{}/{}",
+        uze_core::retired_region::PLUGIN_AUTHORING,
+        uze_core::digest::short_hex(body.as_bytes())
+    );
+    uze_core::text_region::attach(&agents_md, &identity, body).unwrap();
+    if unsafe { libc::geteuid() } == 0 {
+        return; // root writes into a read-only directory anyway
+    }
+    fs::set_permissions(&fx.project_root, fs::Permissions::from_mode(0o555)).unwrap();
 
-    let failure = app
-        .project()
-        .install(&fx.project_root, &AlwaysTrust)
-        .expect_err("the projection failed, so the command did");
+    let failure = app.project().install(&fx.project_root, &AlwaysTrust);
+    fs::set_permissions(&fx.project_root, fs::Permissions::from_mode(0o755)).unwrap();
+    let failure = failure.expect_err("the cleanup failed, so the command did");
     assert!(
-        !format!("{failure}").is_empty(),
-        "and the refusal names what went wrong"
+        format!("{failure}").contains("AGENTS.md"),
+        "and the refusal names what went wrong: {failure}"
     );
 }
 
@@ -1268,13 +1273,12 @@ mod drift {
         );
     }
 
-    /// A region the package manager keeps in `AGENTS.md` can fall behind on
-    /// its own (edited away, the file replaced), and the agents reading the
-    /// file then read something the project no longer says. That is package
-    /// drift, and `install` clears it. The workspace's region is not: a
-    /// policy change is the workspace's to bring in step.
+    /// A region an earlier release left in `AGENTS.md` is package drift:
+    /// agents reading the file read instructions no release maintains, and
+    /// `install` takes it out. A policy change is nothing of the kind, since
+    /// the policy reaches agents through their launch.
     #[test]
-    fn a_package_region_gone_from_agents_md_reads_as_stale_until_install_clears_it() {
+    fn a_region_an_earlier_release_left_reads_as_stale_until_install_removes_it() {
         let fx = Fixture::new("drift-projection");
         let manifest = fx.project_root.join("agents.yaml");
         fs::write(&manifest, "workspace:\n  delivery: merge\n").unwrap();
@@ -1289,7 +1293,7 @@ mod drift {
             "a freshly reconciled project is not stale"
         );
 
-        fs::write(&manifest, "workspace:\n  delivery: merge\n").unwrap();
+        fs::write(&manifest, "workspace:\n  delivery: push\n").unwrap();
         assert!(
             app.project()
                 .plan(&fx.project_root)
@@ -1299,15 +1303,23 @@ mod drift {
             "a policy change is not the package manager's to count"
         );
 
-        fs::write(fx.project_root.join("AGENTS.md"), "# Mine\n").unwrap();
+        let agents_md = fx.project_root.join("AGENTS.md");
+        fs::write(&agents_md, "# Mine\n").unwrap();
+        let body = "## Authoring plugins\n\n- old text\n";
+        let identity = format!(
+            "{}/{}",
+            uze_core::retired_region::PLUGIN_AUTHORING,
+            uze_core::digest::short_hex(body.as_bytes())
+        );
+        uze_core::text_region::attach(&agents_md, &identity, body).unwrap();
         let stale = app
             .project()
             .plan(&fx.project_root)
             .unwrap()
             .stale_projection;
         assert!(
-            stale.is_some_and(|stale| stale.region == uze_core::authoring::region::REGION_PREFIX),
-            "the authoring region is gone from the file"
+            stale.is_some_and(|stale| stale.region == uze_core::retired_region::PLUGIN_AUTHORING),
+            "the old region is reported"
         );
 
         app.project()
@@ -1320,13 +1332,9 @@ mod drift {
                 .unwrap()
                 .stale_projection
                 .is_none(),
-            "one install later, the projection has caught up"
+            "one install later, nothing is left"
         );
-        let projected = fs::read_to_string(fx.project_root.join("AGENTS.md")).unwrap();
-        assert!(
-            projected.contains("# Mine") && projected.contains("uze agent plugin create"),
-            "the operator's text stays and the region is back: {projected}"
-        );
+        assert_eq!(fs::read_to_string(&agents_md).unwrap(), "# Mine\n");
     }
 }
 

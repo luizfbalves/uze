@@ -4,8 +4,7 @@ description: One AGENTS.md that every agent reads
 ---
 
 Write your project's instructions once, in `AGENTS.md` at the project root.
-Every agent reads it: Codex, OpenCode and Antigravity natively, and Claude Code
-through a one-line `CLAUDE.md` that uze keeps in place.
+Every agent reads it natively: Claude Code, Codex, OpenCode and Antigravity.
 
 ## Set it up
 
@@ -29,7 +28,17 @@ If one does not, `uze install` fixes it.
 
 ## What uze writes into it
 
-`AGENTS.md` is yours. The only place uze writes is inside the blocks it marks:
+Nothing. `AGENTS.md` is yours, and no uze command adds to it or changes it.
+
+What a plugin asks of every agent in your project arrives as a rule with
+`trigger: always_on`, copied into `.agents/rules/` when your `agents.yaml`
+declares the plugin ([Rules](/docs/plugins/rules)). An agent the workspace
+launches gets its own instructions (where it works, how its work is
+delivered, how to name it) with its context when it starts
+([Agents](/docs/workspace/agents)), and an agent asked to write a plugin
+follows the `uze:author` skill.
+
+Earlier releases wrote blocks into `AGENTS.md`, marked like this:
 
 ```markdown
 <!-- uze:begin … -->
@@ -37,15 +46,13 @@ If one does not, `uze install` fixes it.
 <!-- uze:end … -->
 ```
 
-They hold what uze needs every agent to know. `uze install` writes one for each
-plugin your `agents.yaml` declares, never for a plugin that is only on your
-machine, and one on authoring plugins, for any project with an `agents.yaml`. The workspace writes its own, on how it isolates the agents it
-launches, only while you use it and only once the project chooses a policy
-([Agents](/docs/workspace/agents)); `uze install` never touches that one.
-Anything you write outside the blocks is never touched, and a block you edit by
-hand is reported, not overwritten.
+and a one-line `CLAUDE.md` that imported `AGENTS.md` for Claude Code. In your
+main checkout, `uze install` removes those blocks once and leaves your own
+text as it was. A block you edited by hand is reported and left for you. The
+`CLAUDE.md` goes with the last block, or keeps your own lines if you wrote
+any. Commit the result once; checkouts made after that are clean.
 
-## Project skills and agents
+## Project skills, agents and rules
 
 Skills the project keeps in `.agents/skills` reach Codex, OpenCode and
 Antigravity natively, wherever you start them. Agents in `.agents/agents` reach
@@ -56,7 +63,18 @@ nothing a launch hands it stays with one project. `uze status` and
 `uze inspect` say which. Plugins you
 install are not affected: they reach every agent everywhere.
 
+Rules the project keeps in `.agents/rules` reach every agent, inside the
+workspace or out of it: Antigravity reads them natively, and Claude Code, Codex
+and OpenCode receive them through the rules engine `uze setup` installs. See
+[Rules](/docs/plugins/rules).
+
+The workspace shows the same answer per agent: the harness's details under
+**Manage** and the agent's section of the space view list `AGENTS.md`,
+`.agents/skills`, `.agents/agents` and `.agents/rules`, each with how it reaches
+that agent.
+
 <Cards>
+  <Card title="Rules" href="/docs/plugins/rules" />
   <Card title="Skills" href="/docs/reference/skills" />
   <Card title="Harnesses" href="/docs/reference/harnesses" />
 </Cards>

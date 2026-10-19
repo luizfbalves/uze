@@ -17,6 +17,7 @@ from .scenarios import codex_container, drive_onboarding
 class CodexBindings(Bindings):
     harness = "codex"
     display_name = "Codex"
+    compact_command = "/compact"
     launch = "exec codex"
     #: The real prompt, not the splash. A marker loose enough to match
     #: onboarding passes every check against a screen that accepts no
@@ -140,12 +141,16 @@ timeout 240 codex exec {shlex.quote(prompt)} 2>&1
         exec` never asks. So the person opens the project once through the
         launcher, answers the folder trust on screen (`prepare`, the hook
         review included), leaves, and the headless turn runs in the same
-        home afterwards."""
-        final = f"""{prelude}
+        home afterwards. The prelude's own output is replayed after the
+        launch: drawn before it, the onboarding's screen reads consume it."""
+        final = f"""{{
+{prelude}
+}} >/work/prelude.out 2>&1
 cd {cwd}
 set +e
 codex
 echo {self.PROJECT_OPENED}
+cat /work/prelude.out
 timeout 240 codex exec {shlex.quote(prompt)} 2>&1
 """
         tui = Tui(cfg, codex_container(cfg, prov_ip, final), "codex-project")
@@ -224,6 +229,17 @@ timeout 240 codex exec {shlex.quote(prompt)} 2>&1
             "text(JSON.stringify(result));"
         )
         return [{"tool": "functions.exec", "args": script}]
+
+    def read_call(self, expected, path):
+        """Code mode offers no tool that reads a file (0.160.1, the census):
+        the model reads through the shell, inside `exec`, and hands the
+        command's answer back itself — `exec` returns only what its script
+        says with `text`."""
+        script = (
+            f'const result = await tools.exec_command({{cmd: "cat {path}"}});\n'
+            'text(typeof result === "string" ? result : JSON.stringify(result));'
+        )
+        return {"tool": "functions.exec", "args": script}
 
     #: Codex's provider answers the request after a scripted sequence with
     #: its canned turn text.

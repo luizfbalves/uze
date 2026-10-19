@@ -27,10 +27,12 @@ from . import (
     continuity,
     first_session,
     hooks,
+    instructions,
     isolation,
     lifecycle,
     mcp,
     memory,
+    rules,
     skill,
 )
 
@@ -46,7 +48,9 @@ CONTRACTS = (
     isolation,
     continuity,
     briefing,
+    instructions,
     memory,
+    rules,
 )
 
 

@@ -98,7 +98,7 @@ use crate::shared::agent::{
 };
 use crate::shared::dialect::{AgentDialect, Shape, agent_block};
 use crate::shared::mcp::McpEntry;
-use crate::shared::plan::{blocked, unsupported};
+use crate::shared::plan::blocked;
 use crate::shared::process::{is_cli_safe_token, real_executable};
 use crate::shared::provision::{
     OfficialRoute, native_installer_destination, official_installer, provision_cli,
@@ -308,6 +308,19 @@ impl IntegrationPort for AntigravityIntegration {
         ProjectResourceRoute::Native
     }
 
+    fn withheld_paths(&self, package: &StoredPackage) -> Vec<uze_core::integration::WithheldPath> {
+        crate::rules::withheld(package).into_iter().collect()
+    }
+
+    /// `agy` reads `.agents/rules/` of the checkout itself, in this format,
+    /// with its own four triggers (1.2.17; the PoC of 2026-10-06), so the
+    /// engine is never delivered here.
+    fn rules_route(&self) -> uze_core::integration::RulesRoute {
+        uze_core::integration::RulesRoute::native(
+            "Antigravity reads `.agents/rules/` of the checkout itself, so UZE delivers nothing for it",
+        )
+    }
+
     fn capabilities(&self) -> HarnessCapabilities {
         HarnessCapabilities {
             // Agent Skills and MCP servers are delivered natively through
@@ -503,9 +516,6 @@ impl IntegrationPort for AntigravityIntegration {
             CapabilityKind::Mcp => self.mcp_exposure_plan(resource),
             CapabilityKind::Agent => self.agent_exposure_plan(resource),
             CapabilityKind::Hook => self.hook_exposure_plan(resource),
-            CapabilityKind::Instruction => unsupported(
-                "Antigravity attachment is only modeled for Agent Skills, Agents, MCP servers, and portable Hooks.",
-            ),
         }
     }
 

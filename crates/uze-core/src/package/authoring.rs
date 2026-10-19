@@ -25,7 +25,6 @@ use crate::package::store;
 use crate::{PackageId, Result, UzeError};
 
 mod agent_plugins;
-pub mod region;
 pub use agent_plugins::{
     MCP_SCHEMA, PLUGIN_SCHEMA, STANDARD as AGENT_PLUGINS, StandardConformance, UZE_NAMESPACE,
 };
@@ -36,7 +35,7 @@ pub struct ScaffoldCapabilities {
     pub hook: bool,
     pub mcp: bool,
     pub agent: bool,
-    pub instructions: bool,
+    pub rules: bool,
 }
 
 /// The manifest every marketplace carries.
@@ -54,6 +53,9 @@ const PLUGINS_DIRECTORY_KEY: &str = "pluginsDirectory";
 /// The token a plugin's own files are referenced through from `hooks.json`
 /// and `mcp.json`; every delivery resolves it to the installed root.
 const PLUGIN_ROOT_TOKEN: &str = "${PLUGIN_ROOT}";
+
+/// The file name of the rule `--rules` scaffolds.
+const EXAMPLE_RULE: &str = "conventions.md";
 
 /// The initial commit message a scaffolded marketplace is born with.
 const INITIAL_COMMIT_MESSAGE: &str = "chore: scaffold marketplace";
@@ -390,10 +392,12 @@ fn write_plugin_files(
                 ),
         )?;
     }
-    if caps.instructions {
+    if caps.rules {
+        let rules = plugin_root.join(crate::rules::plugin::PACKAGE_RULES_DIR);
+        create_dir(&rules)?;
         write_file(
-            &plugin_root.join("AGENTS.md"),
-            include_str!("authoring/instructions.md"),
+            &rules.join(EXAMPLE_RULE),
+            include_str!("authoring/rule.md.template"),
         )?;
     }
     Ok(())
@@ -622,12 +626,60 @@ pub fn check_plugin(root: &Path) -> Result<ValidationReport> {
         }
         Err(error) => findings.push(error.to_string()),
     }
+    check_rules(root, &id, &mut delivers, &mut findings, &mut warnings)?;
+    warnings.extend(undelivered_agents_md(root));
     findings.extend(escaping_references(root));
     Ok(ValidationReport {
         delivers,
         findings,
         warnings,
         agent_plugins,
+    })
+}
+
+/// The package's rules, read by the validator `uze agent rules check` runs
+/// on a project's own: a file that is not a deliverable rule is a finding,
+/// since every project declaring the plugin would carry a copy no harness
+/// delivers. What under `rules/` is no rule file reaches no project, and is
+/// a warning.
+fn check_rules(
+    root: &Path,
+    id: &PackageId,
+    delivers: &mut Vec<String>,
+    findings: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
+    for shipped in crate::rules::plugin::shipped_rules(root)? {
+        let path = shipped.package_path();
+        match shipped.parse() {
+            Ok(_) => delivers.push(format!("package:{}:{path}", id.as_str())),
+            Err(reason) => findings.push(format!("{}: {reason}", root.join(&path).display())),
+        }
+    }
+    warnings.extend(
+        crate::rules::plugin::unread_entries(root)
+            .into_iter()
+            .map(|entry| {
+                format!(
+                    "{entry}: not a rule; a plugin's rules are the `*.md` files directly under \
+                     `rules/`, so it reaches no project"
+                )
+            }),
+    );
+    Ok(())
+}
+
+/// A root `AGENTS.md`, which no release delivers any more: a warning, since
+/// the plugin still installs and every other capability still reaches its
+/// harnesses, but what the file says reaches no agent.
+fn undelivered_agents_md(root: &Path) -> Option<String> {
+    let file = root.join(crate::project_context::AGENTS_MD_FILE_NAME);
+    file.is_file().then(|| {
+        format!(
+            "{}: not delivered; a plugin speaks to every agent of a project that declares it \
+             through a rule with `trigger: always_on` under `rules/`",
+            file.display()
+        )
     })
 }
 

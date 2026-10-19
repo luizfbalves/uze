@@ -25,6 +25,8 @@ pub(super) struct AgentSupport {
     project_skills_label: &'static str,
     project_agents: State,
     project_agents_label: &'static str,
+    project_rules: State,
+    project_rules_label: &'static str,
 }
 
 #[derive(Clone, Copy)]
@@ -49,6 +51,7 @@ impl AgentSupport {
         let (instructions, instructions_label) = describe(&context.instructions);
         let (project_skills, project_skills_label) = describe(&context.project_skills);
         let (project_agents, project_agents_label) = describe(&context.project_agents);
+        let (project_rules, project_rules_label) = describe(&context.project_rules);
         Self {
             // Identity and presence come from the resolution itself, not
             // from `health`, so the popup can never label one harness's
@@ -61,6 +64,8 @@ impl AgentSupport {
             project_skills_label,
             project_agents,
             project_agents_label,
+            project_rules,
+            project_rules_label,
         }
     }
 }
@@ -74,12 +79,13 @@ fn describe(delivery: &ResourceDelivery) -> (State, &'static str) {
     match delivery {
         ResourceDelivery::Native => (State::Ready, "native"),
         ResourceDelivery::Projected => (State::Ready, "loaded (shim)"),
-        ResourceDelivery::Bridged => (State::Ready, "loaded (bridge)"),
+        ResourceDelivery::RulesEngine => (State::Ready, "rules engine"),
         ResourceDelivery::AbsentFromProject => (State::Neutral, "none in project"),
         ResourceDelivery::Undelivered(reason) => match reason {
             UndeliveredReason::HarnessAbsent => (State::Error, "harness not installed"),
-            UndeliveredReason::ShimMissing => (State::Warning, "run uze setup"),
-            UndeliveredReason::Bridge(_) => (State::Warning, "not loaded"),
+            UndeliveredReason::ShimMissing | UndeliveredReason::RulesEngineMissing => {
+                (State::Warning, "run uze setup")
+            }
             UndeliveredReason::Unsupported => (State::Error, "not supported"),
         },
     }
@@ -121,6 +127,11 @@ pub(crate) fn compatibility(support: &AgentSupport) -> (Vec<Compatible>, Vec<Com
             ".agents/agents",
             support.project_agents,
             support.project_agents_label,
+        ),
+        (
+            ".agents/rules",
+            support.project_rules,
+            support.project_rules_label,
         ),
     ]
     .into_iter()
@@ -181,12 +192,11 @@ fn capability_state(support: &AgentSupport, kind: CapabilityKind) -> CapabilityS
 
 /// The order a reader meets a plugin's resources in: what they invoke
 /// first, what runs on its own after.
-const RESOURCE_ORDER: [CapabilityKind; 5] = [
+const RESOURCE_ORDER: [CapabilityKind; 4] = [
     CapabilityKind::AgentSkill,
     CapabilityKind::Agent,
     CapabilityKind::Hook,
     CapabilityKind::Mcp,
-    CapabilityKind::Instruction,
 ];
 
 /// A plugin's resources by kind, in reading order, leaving out the kinds
@@ -216,7 +226,6 @@ pub(crate) fn resource_groups(
 
 pub(crate) fn capability_label(kind: CapabilityKind) -> &'static str {
     match kind {
-        CapabilityKind::Instruction => "Instructions",
         CapabilityKind::AgentSkill => "Skills",
         CapabilityKind::Mcp => "MCP",
         CapabilityKind::Agent => "Agents",
@@ -230,7 +239,7 @@ mod tests {
     use uze_application::application::{
         AgentContextStatus, ContextMechanism, HarnessContextSupport, HarnessHealth,
     };
-    use uze_core::integration::{AttachmentState, HarnessDetection, PublicationStatus};
+    use uze_core::integration::{HarnessDetection, PublicationStatus};
 
     fn health(present: bool) -> HarnessHealth {
         HarnessHealth {
@@ -253,6 +262,7 @@ mod tests {
                 instructions: ContextMechanism::RuntimeShim,
                 project_skills: ContextMechanism::RuntimeShim,
                 project_agents: ContextMechanism::RuntimeShim,
+                project_rules: ContextMechanism::RulesEngine,
             },
         }
     }
@@ -271,8 +281,39 @@ mod tests {
             instructions,
             project_skills: agents_directory,
             project_agents,
+            project_rules: ResourceDelivery::AbsentFromProject,
         };
         AgentSupport::resolve(health(present), &context)
+    }
+
+    #[test]
+    fn the_projects_rules_are_listed_with_how_they_reach_the_agent() {
+        let rules_as = |delivery: ResourceDelivery| {
+            let context = AgentContextStatus {
+                integration: "claude-code".to_owned(),
+                display_name: "Claude Code".to_owned(),
+                present: true,
+                root: std::path::PathBuf::from("/project"),
+                instructions: ResourceDelivery::Native,
+                project_skills: ResourceDelivery::Native,
+                project_agents: ResourceDelivery::Native,
+                project_rules: delivery,
+            };
+            let support = AgentSupport::resolve(health(true), &context);
+            let (project, _) = compatibility(&support);
+            let (name, status, _) = project.last().cloned().unwrap();
+            assert_eq!(name, ".agents/rules");
+            status
+        };
+        assert!(rules_as(ResourceDelivery::RulesEngine).ends_with("Rules engine"));
+        assert!(rules_as(ResourceDelivery::Native).ends_with("Native"));
+        assert!(
+            rules_as(ResourceDelivery::Undelivered(
+                UndeliveredReason::RulesEngineMissing
+            ))
+            .ends_with("Run uze setup")
+        );
+        assert!(rules_as(ResourceDelivery::AbsentFromProject).ends_with("None in project"));
     }
 
     #[test]
@@ -333,6 +374,7 @@ mod tests {
             instructions: ResourceDelivery::Native,
             project_skills: ResourceDelivery::Native,
             project_agents: ResourceDelivery::Undelivered(UndeliveredReason::Unsupported),
+            project_rules: ResourceDelivery::AbsentFromProject,
         };
         let support = AgentSupport::resolve(health(true), &context);
         assert_eq!(support.project_skills_label, "native");
@@ -353,29 +395,14 @@ mod tests {
     }
 
     #[test]
-    fn a_native_reader_and_a_matched_bridge_both_read_as_delivered() {
-        let native = support(true, ResourceDelivery::Native, ResourceDelivery::Native);
-        assert_eq!(native.instructions_label, "native");
-        assert!(matches!(native.instructions, State::Ready));
-
-        let bridged = support(
+    fn a_native_reader_reads_as_delivered_whatever_the_agents_directory_gets() {
+        let native = support(
             true,
-            ResourceDelivery::Bridged,
+            ResourceDelivery::Native,
             ResourceDelivery::Undelivered(UndeliveredReason::Unsupported),
         );
-        assert_eq!(bridged.instructions_label, "loaded (bridge)");
-        assert!(matches!(bridged.instructions, State::Ready));
-        assert_eq!(bridged.project_skills_label, "not supported");
-    }
-
-    #[test]
-    fn a_broken_bridge_is_a_warning_naming_the_missing_delivery() {
-        let support = support(
-            true,
-            ResourceDelivery::Undelivered(UndeliveredReason::Bridge(AttachmentState::Missing)),
-            ResourceDelivery::AbsentFromProject,
-        );
-        assert_eq!(support.instructions_label, "not loaded");
-        assert!(matches!(support.instructions, State::Warning));
+        assert_eq!(native.instructions_label, "native");
+        assert!(matches!(native.instructions, State::Ready));
+        assert_eq!(native.project_skills_label, "not supported");
     }
 }

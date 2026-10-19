@@ -10,6 +10,7 @@ pub(crate) fn run_agent(app: &UzeApplication, action: AgentAction) -> Result<()>
         AgentAction::Work { action } => run_agent_work(app, action),
         AgentAction::Memory { action } => run_agent_memory(app, action),
         AgentAction::Artifacts { action } => run_agent_artifacts(action),
+        AgentAction::Rules { action } => run_agent_rules(app, action),
         AgentAction::Context { action } => run_context(app, action),
         AgentAction::Market { action } => run_agent_market(app, action),
         AgentAction::Plugin { action } => run_agent_plugin(app, action),
@@ -114,8 +115,17 @@ pub(crate) fn run_agent_plugin(app: &UzeApplication, action: AgentPluginAction) 
             mcp,
             agent,
             instructions,
+            rules,
             format,
         } => {
+            if instructions {
+                return Err(uze_application::UzeError::MarketplaceScaffold(
+                    "`--instructions` is gone: a plugin's AGENTS.md is no longer delivered. \
+                     A plugin speaks to every agent of a project that declares it through a \
+                     rule with `trigger: always_on`; scaffold one with `--rules`"
+                        .to_owned(),
+                ));
+            }
             let report = with_spinner(&format!("Scaffolding plugin {name}..."), || {
                 app.project().create_plugin(
                     &market,
@@ -126,7 +136,7 @@ pub(crate) fn run_agent_plugin(app: &UzeApplication, action: AgentPluginAction) 
                         hook,
                         mcp,
                         agent,
-                        instructions,
+                        rules,
                     },
                 )
             })?;
@@ -247,6 +257,9 @@ pub(crate) fn delivered_as(identity: &str) -> (&'static str, String) {
             skill.rsplit('/').next().unwrap_or(skill).to_owned(),
         );
     }
+    if let Some(rule) = path.strip_prefix("rules/") {
+        return ("rule", rule.trim_end_matches(".md").to_owned());
+    }
     if let Some(agent) = path.strip_prefix("agents/") {
         return ("agent", agent.trim_end_matches(".md").to_owned());
     }
@@ -321,6 +334,14 @@ pub(crate) fn run_agent_work(app: &UzeApplication, action: AgentWorkAction) -> R
                     uze_application::inert(&warning.to_string())
                 );
             }
+            // What the parent hands its subagent with the path: a split
+            // checkout carries no instructions of its own, and a subagent's
+            // harness may not pass it the parent's launch context. On
+            // stderr, so stdout stays the path alone.
+            eprintln!(
+                "Hand the subagent this checkout with: commit your work here, as you go; \
+                 never switch its branch, and never make a worktree with Git."
+            );
             // The path alone, so `cd "$(uze agent work split <topic>)"` works.
             println!("{}", split.path.display());
         }
@@ -630,6 +651,127 @@ pub(crate) fn render_artifacts_check(report: &ArtifactsCheckReport) -> String {
         ));
     }
     out
+}
+
+/// Validates the checkout's rules with the validator `uze status` reports
+/// from. Like the artifacts check, the verdict is the exit code: an agent
+/// that has just written a rule is told it will not be delivered, rather
+/// than handed a report it could decide it passed.
+pub(crate) fn run_agent_rules(app: &UzeApplication, action: AgentRulesAction) -> Result<()> {
+    let AgentRulesAction::Check { path, format } = action;
+    let report = app.project().rules(&context_path(path))?;
+    emit(format, &report, render_rules_check);
+    if report.is_clean() {
+        return Ok(());
+    }
+    if report.not_rules.is_empty()
+        && let Some(reason) = report.unreadable_manifest()
+    {
+        return Err(uze_application::UzeError::RulesNotDeliverable(format!(
+            "{} registers nothing: {}",
+            uze_application::application::RULES_MANIFEST_FILE,
+            uze_application::inert(reason)
+        )));
+    }
+    let checked = report.not_rules.len() + report.rules.len();
+    Err(uze_application::UzeError::RulesNotDeliverable(format!(
+        "{} of {} under {} {}",
+        report.not_rules.len(),
+        count(checked, "file"),
+        report.directory,
+        if report.not_rules.len() == 1 {
+            "is not a deliverable rule"
+        } else {
+            "are not deliverable rules"
+        }
+    )))
+}
+
+pub(crate) fn render_rules_check(report: &uze_application::application::RulesReport) -> String {
+    if !report.present {
+        return format!(
+            "no rules: {} has no {}\n",
+            progress::path(&report.root),
+            report.directory
+        );
+    }
+    let checked = report.rules.len() + report.not_rules.len();
+    let mut out = progress::report_title(
+        report.directory,
+        Some(&format!("{} checked", count(checked, "file"))),
+    );
+    out.push('\n');
+    let mut rows: Vec<(&str, Vec<String>)> = report
+        .rules
+        .iter()
+        .map(|rule| {
+            let scope = match (&rule.description, rule.patterns.is_empty()) {
+                (_, false) => uze_application::inert(&rule.patterns.join(", ")).into_owned(),
+                (Some(description), true) => uze_application::inert(description).into_owned(),
+                (None, true) => String::new(),
+            };
+            (
+                rule.path.as_str(),
+                vec![
+                    progress::success_icon(),
+                    rule.path.clone(),
+                    progress::label(rule.trigger),
+                    scope,
+                ],
+            )
+        })
+        .chain(report.not_rules.iter().map(|file| {
+            (
+                file.path.as_str(),
+                vec![
+                    progress::error_icon(),
+                    file.path.clone(),
+                    progress::label("not a rule"),
+                    progress::error_text(uze_application::inert(&file.reason)),
+                ],
+            )
+        }))
+        .collect();
+    rows.sort_by(|left, right| left.0.cmp(right.0));
+    out.push_str(&progress::aligned_rows(
+        rows.into_iter().map(|(_, row)| row).collect(),
+    ));
+    out.push('\n');
+    out.push_str(&render_manifest_findings(report));
+    if report.is_clean() {
+        out.push_str(&format!(
+            "\n{} every file is a deliverable rule\n",
+            progress::success_icon()
+        ));
+    }
+    out
+}
+
+/// What `.agents/rules.json` itself needs said: that it does not parse, or
+/// that it names manifests UZE does not read.
+pub(crate) fn render_manifest_findings(
+    report: &uze_application::application::RulesReport,
+) -> String {
+    let Some(manifest) = &report.manifest else {
+        return String::new();
+    };
+    let mut text = String::new();
+    if let Some(reason) = &manifest.unreadable {
+        text.push_str(&format!(
+            "{} {}: registers nothing, {}\n",
+            progress::warning_icon(),
+            manifest.path,
+            uze_application::inert(reason)
+        ));
+    }
+    if manifest.inherits {
+        text.push_str(&format!(
+            "{} {}: `inherits` is not followed; the rules it reaches arrive only where a harness reads the manifest itself\n",
+            progress::warning_icon(),
+            manifest.path
+        ));
+    }
+    text
 }
 
 /// `uze agent memory …` — the facts later agents are given, on any harness.

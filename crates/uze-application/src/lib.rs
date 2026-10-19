@@ -26,10 +26,9 @@ pub use uze_core::{
     Result, UzeError, UzeHome,
     anchor::anchor_root_or_self,
     capability::CapabilityKind,
-    context::PlannedAction,
     features::{ALL_FEATURES, Feature},
     hosts::HostEntry,
-    integration::{AttachmentState, HarnessDetection, PublicationStatus},
+    integration::{AttachmentState, HarnessDetection, PublicationStatus, RulesRoute, WithheldPath},
     naming::{
         FixedResolution, NameCollisionAuthority, NameCollisionRequest, NameCollisionResolution,
         NoNameCollisionAuthority,

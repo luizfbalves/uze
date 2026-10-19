@@ -1,0 +1,89 @@
+# The project-rules glob dialect, as one table both readers are proven
+# against: uze-core's matcher (crates/uze-core/src/project/rules/tests.rs)
+# and the generated engine's ERE translation.
+#
+# Columns, separated by one tab: pattern, path, expected.
+#   expected is `match`, `no-match`, or `invalid` (the pattern is outside
+#   the dialect, so no reader delivers a rule using it; path is one the
+#   pattern would name if it were accepted, so a reader that took it would
+#   be caught delivering).
+# Paths are relative to the checkout root, `/` between segments.
+# Lines starting with `#` and blank lines are ignored.
+
+# a directory is named after `**/`, since Antigravity matches against the
+# absolute path; `**` spans any number of whole segments, none included
+**/src/ui/**	src/ui/button.ts	match
+**/src/ui/**	src/ui/forms/field.ts	match
+**/src/ui/**	src/core/math.ts	no-match
+**/src/ui/**	src/uikit/button.ts	no-match
+**/*.ts	main.ts	match
+**/*.ts	src/a/b/c.ts	match
+**/*.ts	src/a/b/c.tsx	no-match
+**/src/**/*.test.ts	src/core/math.test.ts	match
+**/src/**/*.test.ts	src/math.test.ts	match
+**/src/**/*.test.ts	src/core/math.ts	no-match
+**/tests/**	tests/e2e/login.ts	match
+**/tests/**	src/tests/login.ts	match
+**	anything/at/all.md	match
+**/a/**/b	a/b	match
+**/a/**/b	a/x/y/b	match
+**/a/**/b	a/x/y/c	no-match
+**/mid/**/leaf.txt	mid/leaf.txt	match
+
+# a pattern with no `/` names a file at any depth
+*.md	README.md	match
+*.md	docs/README.md	match
+*.md	.hidden.md	match
+Makefile	Makefile	match
+Makefile	tools/Makefile	match
+Makefile	makefile	no-match
+a?c	a/c	no-match
+
+# `*` stays inside one segment
+**/src/*.rs	src/main.rs	match
+**/src/*.rs	src/cli/agent.rs	no-match
+**/src/*	src/main.rs	match
+**/src/*_test.go	src/a_test.go	match
+**/src/*_test.go	src/_test.go	match
+
+# `?` is one character inside one segment
+**/src/?.rs	src/a.rs	match
+**/src/?.rs	src/ab.rs	no-match
+**/src/?.rs	src//.rs	no-match
+
+# `[…]` is one character of a set or a range
+**/src/[ab].rs	src/a.rs	match
+**/src/[ab].rs	src/c.rs	no-match
+**/v[0-9].md	v7.md	match
+**/v[0-9].md	vx.md	no-match
+
+# literals are exact, case and spaces included
+**/docs/adr/README.md	docs/adr/README.md	match
+**/src/a+b.rs	src/a+b.rs	match
+**/src/a.rs	src/abrs	no-match
+**/src/$x^.rs	src/$x^.rs	match
+**/space dir/*.txt	space dir/a.txt	match
+
+# outside the dialect
+src/ui/**	src/ui/a.ts	invalid
+src/*.rs	src/main.rs	invalid
+*/x.one	a/x.one	invalid
+**/src/**/*.{ts,tsx}	src/a.ts	invalid
+**/src/[!ab].rs	src/c.rs	invalid
+**/src/[^ab].rs	src/c.rs	invalid
+**/[]x.rs	]x.rs	invalid
+**/src/[a[b].rs	src/a.rs	invalid
+**/[z-a].rs	z.rs	invalid
+**/src/[ab.rs	src/[ab.rs	invalid
+!**/src/**	src/a.rs	invalid
+/src/**	src/a.rs	invalid
+**/src/@(a|b).rs	src/@(a|b).rs	invalid
+**/a|b.rs	a|b.rs	invalid
+**/x(y).rs	x(y).rs	invalid
+**/src\ui\**	src\ui\a.rs	invalid
+**/src//ui	src/ui	invalid
+**/src/ui/	src/ui	invalid
+./src/**	src/a.rs	invalid
+**/src/../ui	ui	invalid
+**/src/**.ts	src/a.ts	invalid
+a**	ab	invalid

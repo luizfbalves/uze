@@ -80,13 +80,7 @@ pub(crate) fn render_update_summary(report: &uze_application::application::Updat
             }
         }
     }
-    if report.reconciled {
-        lines.push_str(&progress::change(
-            Change::Updated,
-            "AGENTS.md",
-            Some("reconciled"),
-        ));
-    }
+    lines.push_str(&render_rule_copies(&report.rules));
     let outcome = if report.outcomes.is_empty() {
         match report.scope {
             UpdateScope::Project => "this project declares no plugins".to_owned(),
@@ -188,8 +182,9 @@ pub(crate) fn render_update_report(report: &uze_application::application::Update
             text.push_str(&render_deliveries(deliveries, false, "    "));
         }
     }
-    if report.reconciled {
-        text.push_str("  Project context reconciled\n");
+    if !report.rules.is_empty() {
+        text.push_str(&format!("\n{}", progress::report_section("Rules")));
+        text.push_str(&render_rule_copies(&report.rules));
     }
     text
 }
@@ -301,10 +296,11 @@ pub(crate) fn render_inspection(report: &PluginInspection, verbose: bool) -> Str
             let lost = match (&one.blocked, one.route) {
                 (Some(reason), _) => Some(format!("blocked: {reason}")),
                 (None, CompatibilityRoute::Native) => None,
-                (None, route) if one.kind != uze_application::CapabilityKind::Instruction => Some(
-                    format!("{}: {}", route_word(route), leading_sentence(&one.evidence)),
-                ),
-                _ => None,
+                (None, route) => Some(format!(
+                    "{}: {}",
+                    route_word(route),
+                    leading_sentence(&one.evidence)
+                )),
             };
             if let Some(lost) = lost {
                 notes.push_str(&progress::change(
@@ -321,11 +317,14 @@ pub(crate) fn render_inspection(report: &PluginInspection, verbose: bool) -> Str
     }
     text.push_str("\n\n");
     for delivery in &report.deliveries {
-        for path in &delivery.withheld {
+        for withheld in &delivery.withheld {
             notes.push_str(&progress::change(
                 progress::Change::Attention,
                 &delivery.display_name,
-                Some(&format!("{path} not delivered: no portable equivalent")),
+                Some(&format!(
+                    "{} not delivered: {}",
+                    withheld.path, withheld.reason
+                )),
             ));
         }
     }
@@ -385,9 +384,6 @@ impl Reach {
         match delivered {
             None => Reach::Unsupported,
             Some(one) if one.blocked.is_some() => Reach::Blocked,
-            Some(one) if one.kind == uze_application::CapabilityKind::Instruction => {
-                Reach::Delivered
-            }
             Some(one) => match one.route {
                 CompatibilityRoute::Native => Reach::Delivered,
                 CompatibilityRoute::Adaptable | CompatibilityRoute::Degraded => Reach::Adapted,
@@ -547,7 +543,6 @@ fn harness_rows(
 pub(crate) fn capability_word(kind: uze_application::CapabilityKind) -> &'static str {
     use uze_application::CapabilityKind;
     match kind {
-        CapabilityKind::Instruction => "instruction",
         CapabilityKind::AgentSkill => "skill",
         CapabilityKind::Mcp => "mcp",
         CapabilityKind::Agent => "agent",
@@ -581,13 +576,6 @@ pub(crate) fn render_effective_delivery(
             .exposed_name
             .as_deref()
             .unwrap_or(capability.identity.as_str());
-        if capability.kind == uze_application::CapabilityKind::Instruction {
-            out.push_str(&format!(
-                "  {kind:<10}  {name}  {}\n",
-                progress::label("through the project context")
-            ));
-            continue;
-        }
         if let Some(reason) = &capability.blocked {
             out.push_str(&format!(
                 "  {kind:<10}  {name}  {}\n",
@@ -656,6 +644,7 @@ pub(crate) fn render_add_summary(report: &AddPluginReport) -> String {
     use progress::Change;
     let commit = report.plugin.commit.as_deref().map(short_commit);
     let mut lines = progress::change(Change::Added, &report.plugin.id, commit);
+    lines.push_str(&render_rule_copies(report.rules.as_slice()));
     let (issues, _) = delivery_issues(&report.deliveries);
     if !issues.is_empty() {
         lines.push('\n');
@@ -667,6 +656,78 @@ pub(crate) fn render_add_summary(report: &AddPluginReport) -> String {
         "1 plugin installed on this machine only"
     };
     progress::change_report("install", &lines, scope)
+}
+
+/// What a lifecycle operation did to each plugin's rules in the checkout:
+/// a line per copy written or removed, and one per copy it refused to touch
+/// or did not recognise, with why. Paths are the checkout's, so a person
+/// can open each one.
+pub(crate) fn render_rule_copies(copies: &[uze_application::application::RuleCopies]) -> String {
+    use progress::Change;
+    use uze_application::application::{RULES_MANIFEST_FILE, RulesManifestChange};
+    let mut lines = String::new();
+    for plugin in copies {
+        match &plugin.manifest {
+            RulesManifestChange::Unchanged => {}
+            RulesManifestChange::Registered => lines.push_str(&progress::change(
+                Change::Updated,
+                RULES_MANIFEST_FILE,
+                Some(&format!("registers {}'s folder", plugin.plugin)),
+            )),
+            RulesManifestChange::Unregistered => lines.push_str(&progress::change(
+                Change::Updated,
+                RULES_MANIFEST_FILE,
+                Some(&format!("no longer registers {}'s folder", plugin.plugin)),
+            )),
+            RulesManifestChange::Removed => lines.push_str(&progress::change(
+                Change::Removed,
+                RULES_MANIFEST_FILE,
+                Some("nothing else was left in it"),
+            )),
+            RulesManifestChange::Unreadable(reason) => lines.push_str(&progress::change(
+                Change::Attention,
+                RULES_MANIFEST_FILE,
+                Some(&format!(
+                    "does not parse, so it was left as it is, and {}'s rules with it: {reason}",
+                    plugin.plugin
+                )),
+            )),
+        }
+        for path in &plugin.written {
+            lines.push_str(&progress::change(Change::Added, path, None));
+        }
+        for path in &plugin.removed {
+            lines.push_str(&progress::change(Change::Removed, path, None));
+        }
+        for path in &plugin.drifted {
+            lines.push_str(&progress::change(
+                Change::Attention,
+                path,
+                Some(&format!(
+                    "edited, so left as it is: differs from {} at the locked revision",
+                    plugin.plugin
+                )),
+            ));
+        }
+        for path in &plugin.extra {
+            lines.push_str(&progress::change(
+                Change::Attention,
+                path,
+                Some(&format!(
+                    "not a rule {} ships; left in place",
+                    plugin.plugin
+                )),
+            ));
+        }
+        if let Some(reason) = &plugin.unverified {
+            lines.push_str(&progress::change(
+                Change::Attention,
+                &plugin.plugin,
+                Some(&format!("rules not checked: {reason}")),
+            ));
+        }
+    }
+    lines
 }
 
 /// A commit as a person compares two of them.
@@ -970,6 +1031,7 @@ pub(crate) fn render_install(report: &uze_application::application::InstallRepor
             removed,
             skipped,
             reconciled,
+            rules,
             ..
         } => {
             let mut lines = String::new();
@@ -986,6 +1048,7 @@ pub(crate) fn render_install(report: &uze_application::application::InstallRepor
                     Some(&one.reason),
                 ));
             }
+            lines.push_str(&render_rule_copies(rules));
             if *reconciled {
                 lines.push_str(&progress::change(
                     Change::Updated,
@@ -1022,7 +1085,7 @@ mod tests {
                 revision: revision.to_owned(),
                 deliveries: Vec::new(),
             }],
-            reconciled: false,
+            rules: Vec::new(),
         }
     }
 

@@ -11,8 +11,10 @@
 //! that is reached by *every* relaunch, including the one the terminal
 //! runtime performs when it restores a workspace with no client in the room.
 //! It therefore does no more than verifying the launch's claim against the
-//! record it names — a few `stat`s and one small read — and, on a first
-//! launch, one small write. It reads no environment: the shim decides what
+//! record it names, reading `agents.yaml` and the checkout's `HEAD` file for
+//! the agent's instructions, and writing its context: small reads and
+//! writes, and no Git process unless a channel created `.worktrees/` this
+//! launch. It reads no environment: the shim decides what
 //! the launch claims and hands it in.
 //!
 //! [`refresh`] is the other half, and runs where a background answer already
@@ -20,14 +22,19 @@
 //! writes that back, so a conversation cleared, forked or switched inside
 //! the process is the one that resumes rather than the one it began with.
 
-use std::{ffi::OsString, path::Path};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 
 use crate::{
     agent_context::{self, Section, SectionAsk},
-    briefing,
+    briefing, checkout,
     conversation::{self, Claim, ConversationOrigin, ConversationRecord, SessionId},
+    declaration,
     home::UzeHome,
     integration::{AgentContext, IntegrationPort, ObservationContext, SessionContinuity},
+    worktree::{self, Placement},
 };
 
 /// What a launch should carry, and what could not be done.
@@ -45,7 +52,8 @@ pub struct LaunchPlan {
     /// subcommand.
     pub trailing: Vec<OsString>,
     /// Said once, on the shim's existing note channel. Present only when
-    /// something was expected to be carried over and could not be.
+    /// something was expected to be carried over and could not be; several
+    /// such things are all said, in the order they were found.
     pub note: Option<String>,
     /// Whether this launch is one UZE owns: an agent its record backs, in
     /// the directory the record puts it. Only such a launch is changed.
@@ -55,6 +63,15 @@ pub struct LaunchPlan {
 impl LaunchPlan {
     fn nothing() -> Self {
         Self::default()
+    }
+
+    /// Adds `note` to what this launch says, never in place of it: the
+    /// operator hears each thing that did not carry over.
+    fn add_note(&mut self, note: String) {
+        self.note = Some(match self.note.take() {
+            Some(earlier) => format!("{earlier}; {note}"),
+            None => note,
+        });
     }
 
     fn args(args: Vec<OsString>) -> Self {
@@ -119,6 +136,7 @@ fn plan_for(
             claim.cwd,
             integration,
             None,
+            Conversation::New,
             sections,
         );
         return plan;
@@ -153,6 +171,7 @@ fn plan_for(
                 claim.cwd,
                 integration,
                 Some(&recorded),
+                Conversation::Resumed,
                 sections,
             );
             return plan;
@@ -165,7 +184,7 @@ fn plan_for(
             "the recorded conversation is no longer there; starting a new one"
         );
         let mut plan = start(home, claim.cwd, integration, owner, sections);
-        plan.note = Some(format!(
+        plan.add_note(format!(
             "the recorded conversation ({recorded}) is no longer there; starting a new one"
         ));
         return plan;
@@ -277,17 +296,26 @@ fn start(
         cwd,
         integration,
         session.as_ref(),
+        Conversation::New,
         sections,
     );
     plan
 }
 
+/// Whether a launch starts a conversation or carries one on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Conversation {
+    New,
+    Resumed,
+}
+
 /// Gives this launch the agent's context through the harness's channel, or,
-/// on a harness that has none (or whose channel cannot run here), points it
-/// at the briefing with one first turn, given once.
+/// on a harness that has none (or whose channel cannot run here), points a
+/// new conversation at it with one first turn.
 ///
 /// Never fails the launch: a context that cannot be written or delivered
 /// costs this launch its context and says so on the note channel.
+#[allow(clippy::too_many_arguments)]
 fn give_context(
     plan: &mut LaunchPlan,
     home: &UzeHome,
@@ -295,14 +323,20 @@ fn give_context(
     cwd: &Path,
     integration: &dyn IntegrationPort,
     session: Option<&SessionId>,
+    conversation: Conversation,
     extra: &dyn Fn(&SectionAsk<'_>) -> Vec<Section>,
 ) {
     let id = integration.id();
     let agent = owner.agent.as_str();
+    let (instructions, unread) = launch_instructions(home, owner, cwd);
+    if let Some(note) = unread {
+        tracing::warn!(agent, harness = id, %note, "launch instructions from the default policy");
+        plan.add_note(note);
+    }
     if integration.context_channel().is_degraded()
         || integration.context_channel_unavailable().is_some()
     {
-        plan.trailing = first_turn(home, owner, integration);
+        plan.trailing = first_turn(home, owner, integration, &instructions, conversation);
         return;
     }
     let record = conversation::load(home, &owner.project_root, &owner.agent);
@@ -315,13 +349,13 @@ fn give_context(
         })
         .into_iter()
         .collect();
-    let room = agent_context::room_after(&sections);
+    let room = agent_context::room_after(&instructions, &sections);
     sections.extend(extra(&SectionAsk {
         project_root: &owner.project_root,
         checkout: cwd,
         room,
     }));
-    let Some(text) = agent_context::compose(&sections) else {
+    let Some(text) = agent_context::compose(&instructions, &sections) else {
         // A context an earlier launch was given must not outlive what it
         // said: a retired briefing is no longer the agent's to be told.
         let _ = std::fs::remove_file(
@@ -330,6 +364,14 @@ fn give_context(
         integration.withdraw_context(home, session);
         return;
     };
+    let opening = agent_context::instructions_part(&instructions);
+    let notes = agent_context::notes(&sections);
+    let checkout = checkout_root(&owner.project_root, cwd);
+    let link = context_link(&checkout, agent);
+    let isolation_directory_existed = link
+        .ancestors()
+        .find(|ancestor| ancestor.ends_with(worktree::WORKTREES_DIRECTORY))
+        .is_none_or(Path::exists);
     let delivered =
         agent_context::write(home, &owner.project_root, agent, &text).and_then(|file| {
             let dir = agent_context::dir(home, &owner.project_root, agent);
@@ -340,11 +382,22 @@ fn give_context(
                     dir: &dir,
                     file: &file,
                     text: &text,
+                    instructions: &opening,
+                    notes: notes.as_deref(),
+                    checkout: &checkout,
+                    link: &link,
                     launch: launch.as_str(),
                     session,
                 },
             )
         });
+    // A channel that linked its context into a `.worktrees/` this launch
+    // created must not leave it showing in the operator's status. Asked only
+    // then: excluding it costs a Git call, and the launch path runs on every
+    // relaunch.
+    if !isolation_directory_existed && link.symlink_metadata().is_ok() {
+        let _ = checkout::exclude_isolation_directory(&owner.project_root);
+    }
     match delivered {
         Ok(contribution) => {
             plan.args.extend(contribution.args);
@@ -352,43 +405,141 @@ fn give_context(
         }
         Err(error) => {
             tracing::warn!(agent, harness = id, %error, "agent context not delivered");
-            plan.note
-                .get_or_insert_with(|| format!("this agent's context was not delivered ({error})"));
+            plan.add_note(format!("this agent's context was not delivered ({error})"));
         }
     }
 }
 
-/// The first turn pointing at the briefing pending for this harness, given
-/// once so no later launch — a restore, a relaunch — is pointed at it
-/// again. The briefing is written beside the agent's context for the turn
-/// to name.
+/// The root of the checkout the agent was launched in, spelled the way the
+/// launch's own `cwd` spells it: a channel comparing paths as strings must
+/// not meet `/private/tmp/x` beside `/tmp/x`. An isolated checkout is read
+/// from `cwd` itself; for the primary, the ancestor of `cwd` that is the
+/// project root, falling back to the root as recorded.
+fn checkout_root(project_root: &Path, cwd: &Path) -> PathBuf {
+    if let Some(isolated) = worktree::isolated_checkout(cwd) {
+        return isolated.directory();
+    }
+    // The platform's rule first, which asks the disk nothing; links are
+    // resolved only when no ancestor is spelled as the root is, which is the
+    // case of a launch through a link to the tree.
+    if let Some(ancestor) = cwd
+        .ancestors()
+        .find(|ancestor| uze_platform::path::same_path(ancestor, project_root))
+    {
+        return ancestor.to_path_buf();
+    }
+    let Ok(recorded) = uze_platform::path::canonical(project_root) else {
+        return project_root.to_path_buf();
+    };
+    cwd.ancestors()
+        .find(|ancestor| {
+            uze_platform::path::canonical(ancestor)
+                .is_ok_and(|resolved| uze_platform::path::same_path(&resolved, &recorded))
+        })
+        .map_or_else(|| project_root.to_path_buf(), Path::to_path_buf)
+}
+
+/// Where a channel may link the agent's context so that its path sorts
+/// after the checkout root's: beside an isolated checkout as `<id>~uze`, or
+/// under `.worktrees/~uze/` for an agent in the primary. Both sit in the
+/// directory UZE already owns. A slot's link sorts after the slot itself and
+/// everything inside it, since `/` sorts below `~`; the primary's sorts
+/// after the root, which is its prefix, but not after every directory under
+/// it, which is why a channel names the root too.
+fn context_link(checkout: &Path, agent: &str) -> PathBuf {
+    match worktree::isolated_checkout(checkout) {
+        Some(isolated) => isolated
+            .primary
+            .join(worktree::WORKTREES_DIRECTORY)
+            .join(format!("{}~uze", isolated.name)),
+        None => checkout
+            .join(worktree::WORKTREES_DIRECTORY)
+            .join("~uze")
+            .join(agent),
+    }
+}
+
+/// The branch the agent's record names, which naming the work keeps in
+/// step with the one it renamed.
+fn recorded_branch(home: &UzeHome, owner: &conversation::Owner) -> Option<String> {
+    let store = crate::task::load(home, &owner.project_root).ok()?;
+    let branch = &store.get(&owner.agent)?.isolation()?.branch;
+    (!branch.is_empty()).then(|| branch.clone())
+}
+
+/// The workspace's instructions for an agent launched at `checkout`, from
+/// the policy in force and where the agent stands now. A declaration that
+/// cannot be read gives the default policy's, and says so on the launch's
+/// note: an agent is never launched without being told how its work is
+/// delivered, and never told the default in silence when the project
+/// declared otherwise.
+fn launch_instructions(
+    home: &UzeHome,
+    owner: &conversation::Owner,
+    cwd: &Path,
+) -> (String, Option<String>) {
+    let (policy, unread) = declaration::for_instructions(&owner.project_root);
+    let note = unread.map(|reason| {
+        format!("agents.yaml's workspace section does not read ({reason}); this agent was told the default policy")
+    });
+    let instructions = match worktree::isolated_checkout(cwd) {
+        Some(isolated) => {
+            // `/` whatever the platform: what the agent reads must match the
+            // `.worktrees/<id>` spelling everything else uses.
+            let shown = format!("{}/{}", worktree::WORKTREES_DIRECTORY, isolated.name);
+            // Read now rather than taken from the slot's name: naming the
+            // work renames the branch, and a resume must say the new one.
+            // The record is asked only when the file cannot answer (a
+            // reftable repository): naming the work updates both.
+            let branch = checkout::branch_on_disk(&isolated.directory())
+                .or_else(|| recorded_branch(home, owner))
+                .unwrap_or_else(|| format!("{}{}", worktree::BRANCH_PREFIX, isolated.name));
+            policy.instructions(&Placement::Isolated {
+                checkout: &shown,
+                branch: &branch,
+            })
+        }
+        None => policy.instructions(&Placement::InPlace),
+    };
+    (instructions, note)
+}
+
+/// The one visible first turn a harness with no invisible channel gets,
+/// pointing at the agent's context written beside it: on a new
+/// conversation always, since the instructions reach it no other way, and
+/// on a resume only while a briefing waits to be given, once.
 fn first_turn(
     home: &UzeHome,
     owner: &conversation::Owner,
     integration: &dyn IntegrationPort,
+    instructions: &str,
+    conversation: Conversation,
 ) -> Vec<OsString> {
-    let text = conversation::update(home, &owner.project_root, &owner.agent, |stored| {
+    let briefing = conversation::update(home, &owner.project_root, &owner.agent, |stored| {
         stored.take_first_turn(integration.id())
     })
     .ok()
     .flatten();
-    let Some(text) = text else {
+    if briefing.is_none() && conversation == Conversation::Resumed {
+        return Vec::new();
+    }
+    let sections: Vec<Section> = briefing
+        .iter()
+        .map(|text| Section {
+            heading: briefing::HEADING,
+            text: text.clone(),
+            share: agent_context::BRIEFING_SHARE,
+        })
+        .collect();
+    let Some(text) = agent_context::compose(instructions, &sections) else {
         return Vec::new();
     };
-    match agent_context::write_file(
-        home,
-        &owner.project_root,
-        owner.agent.as_str(),
-        BRIEFING_FILE,
-        &text,
-    ) {
-        Ok(path) => integration.first_turn_args(&briefing::first_turn(&path)),
+    match agent_context::write(home, &owner.project_root, owner.agent.as_str(), &text) {
+        Ok(path) if briefing.is_some() => integration.first_turn_args(&briefing::first_turn(&path)),
+        Ok(path) => integration.first_turn_args(&briefing::instructions_turn(&path)),
         Err(_) => Vec::new(),
     }
 }
-
-/// The briefing a first turn points at, in the agent's context directory.
-const BRIEFING_FILE: &str = "briefing.md";
 
 /// Writes back the conversation the agent is actually in.
 ///
@@ -636,16 +787,40 @@ mod tests {
         conversation::load(home, primary, &store.agents[0].id).briefing
     }
 
-    /// The first turn a degraded harness is given, pointing at the briefing
-    /// written beside the agent's context.
-    fn turn_for(home: &UzeHome, primary: &Path) -> Vec<OsString> {
+    /// Where the agent's context is written, beside its other files.
+    fn context_file(home: &UzeHome, primary: &Path) -> PathBuf {
         let store = task::load(home, primary).unwrap();
-        let path =
-            agent_context::dir(home, primary, store.agents[0].id.as_str()).join(BRIEFING_FILE);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), BRIEFING_TEXT);
+        agent_context::dir(home, primary, store.agents[0].id.as_str())
+            .join(agent_context::FILE_NAME)
+    }
+
+    /// The first turn a degraded harness is given while a briefing waits,
+    /// pointing at the context that carries it.
+    fn turn_for(home: &UzeHome, primary: &Path) -> Vec<OsString> {
+        let path = context_file(home, primary);
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains(BRIEFING_TEXT)
+        );
         vec![
             OsString::from("--turn"),
             OsString::from(briefing::first_turn(&path)),
+        ]
+    }
+
+    /// The first turn a degraded harness is given on a new conversation with
+    /// no briefing waiting.
+    fn instructions_turn_for(home: &UzeHome, primary: &Path) -> Vec<OsString> {
+        let path = context_file(home, primary);
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("Concurrent work isolation")
+        );
+        vec![
+            OsString::from("--turn"),
+            OsString::from(briefing::instructions_turn(&path)),
         ]
     }
 
@@ -697,8 +872,9 @@ mod tests {
             Harness::with_channel(SessionContinuity::Assigned),
         ] {
             let launch = plan(&home, claim(&id, &slot), &harness);
-            assert!(launch.trailing.is_empty());
-            assert!(!launch.args.contains(&OsString::from("--context")));
+            assert!(!mentions_the_briefing(&launch));
+            let context = std::fs::read_to_string(context_file(&home, &primary)).unwrap();
+            assert!(!context.contains(BRIEFING_TEXT), "{context}");
         }
         let kept = pending(&home, &primary).unwrap();
         assert_eq!(kept.integration, "elsewhere");
@@ -736,7 +912,8 @@ mod tests {
                 .expect("the channel's arguments are carried");
             let file = PathBuf::from(&launch.args[at + 1]);
             let context = std::fs::read_to_string(&file).unwrap();
-            assert!(context.starts_with(agent_context::PREAMBLE));
+            assert!(context.starts_with(agent_context::INSTRUCTIONS_LEAD));
+            assert!(context.contains(agent_context::PREAMBLE));
             assert!(context.contains(BRIEFING_TEXT));
             assert!(!file.starts_with(&slot) && !file.starts_with(&primary));
             assert_eq!(
@@ -775,17 +952,23 @@ mod tests {
             text: BRIEFING_TEXT.to_owned(),
             share: agent_context::BRIEFING_SHARE,
         };
+        let owner = conversation::owner_of(&home, claim(&id, &slot)).unwrap();
+        let (instructions, _) = launch_instructions(&home, &owner, &slot);
         assert_eq!(
             asked,
             [
                 (
                     primary.clone(),
                     slot.clone(),
-                    agent_context::room_after(&[])
+                    agent_context::room_after(&instructions, &[])
                 ),
-                (primary, slot, agent_context::room_after(&[briefing])),
+                (
+                    primary,
+                    slot,
+                    agent_context::room_after(&instructions, &[briefing])
+                ),
             ],
-            "asked from the agent's own checkout, with what the briefing leaves"
+            "asked from the agent's own checkout, with what the instructions and the briefing leave"
         );
     }
 
@@ -808,24 +991,225 @@ mod tests {
             stored.briefing = None;
         })
         .unwrap();
-        let next = plan(&home, claim(&id, &slot), &harness);
-        assert!(!next.args.contains(&OsString::from("--context")));
+        plan(&home, claim(&id, &slot), &harness);
+        let context = std::fs::read_to_string(&file).unwrap();
         assert!(
-            !file.exists(),
-            "the last launch's context does not outlive it"
+            !context.contains(BRIEFING_TEXT),
+            "the last launch's briefing does not outlive it: {context}"
         );
     }
 
     #[test]
-    fn nothing_to_give_delivers_nothing() {
-        let (home, _primary, slot, id) = managed("continuity-context-nothing");
+    fn every_launch_is_given_its_instructions() {
+        let (home, primary, slot, id) = managed("continuity-context-instructions");
         let launch = plan(
             &home,
             claim(&id, &slot),
             &Harness::with_channel(SessionContinuity::Assigned),
         );
-        assert!(!launch.args.contains(&OsString::from("--context")));
-        assert!(launch.env.is_empty());
+        assert!(launch.args.contains(&OsString::from("--context")));
+        let context = std::fs::read_to_string(context_file(&home, &primary)).unwrap();
+        assert!(
+            context.starts_with(agent_context::INSTRUCTIONS_LEAD),
+            "{context}"
+        );
+        assert!(context.contains("`.worktrees/slot-1`"), "{context}");
+        assert!(context.contains(&format!("`agent/{id}`")), "{context}");
+        assert!(
+            !context.contains(agent_context::PREAMBLE),
+            "no notes, no preamble: {context}"
+        );
+    }
+
+    #[test]
+    fn the_policy_in_force_is_the_one_the_manifest_declares() {
+        let (home, primary, slot, id) = managed("continuity-context-declared");
+        std::fs::write(
+            primary.join("agents.yaml"),
+            "workspace:\n  delivery: push\n",
+        )
+        .unwrap();
+        plan(
+            &home,
+            claim(&id, &slot),
+            &Harness::with_channel(SessionContinuity::Assigned),
+        );
+        let context = std::fs::read_to_string(context_file(&home, &primary)).unwrap();
+        assert!(
+            context.contains(worktree::CompletionBehavior::instruction_clause(Some(
+                worktree::CompletionBehavior::Push
+            ))),
+            "the declared behavior must be the one an agent reads: {context}"
+        );
+    }
+
+    /// A harness that works in the first of its sorted workspace paths must
+    /// be handed a link that sorts after the checkout, in space UZE owns.
+    #[test]
+    fn the_context_link_sorts_after_the_checkout_inside_the_isolation_directory() {
+        let primary = Path::new("/home/me/project");
+        let slot = primary.join(".worktrees").join("ab12cd");
+        for (cwd, expected) in [
+            (slot.clone(), primary.join(".worktrees").join("ab12cd~uze")),
+            (
+                primary.to_path_buf(),
+                primary.join(".worktrees").join("~uze").join("agent-1"),
+            ),
+        ] {
+            let link = context_link(&checkout_root(primary, &cwd), "agent-1");
+            assert_eq!(link, expected);
+            assert!(
+                link.as_os_str() > cwd.as_os_str(),
+                "{} must sort after {}",
+                link.display(),
+                cwd.display()
+            );
+            assert!(link.starts_with(primary.join(".worktrees")));
+        }
+    }
+
+    /// A launch below the checkout root, or through a link to it, still
+    /// names the root as the launch spells it, and the link sorts after it.
+    #[test]
+    fn the_checkout_root_is_spelled_as_the_launch_spells_it() {
+        let root = uze_testkit::temp::scratch("continuity-checkout-root");
+        let primary = root.join("repo");
+        std::fs::create_dir_all(primary.join("src")).unwrap();
+        let slot = primary.join(".worktrees").join("ab12cd");
+        std::fs::create_dir_all(slot.join("src")).unwrap();
+
+        assert_eq!(checkout_root(&primary, &primary.join("src")), primary);
+        assert_eq!(checkout_root(&primary, &slot.join("src")), slot);
+        let link = context_link(&primary, "agent-1");
+        assert!(link.as_os_str() > primary.as_os_str());
+
+        // The same tree reached through a link, made the Unix way: what the
+        // launch's cwd says is what a channel compares against, not the
+        // resolved path.
+        #[cfg(unix)]
+        {
+            let alias = root.join("alias");
+            std::os::unix::fs::symlink(&primary, &alias).unwrap();
+            assert_eq!(checkout_root(&primary, &alias.join("src")), alias);
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn every_note_a_launch_has_is_said() {
+        let mut plan = LaunchPlan::nothing();
+        plan.add_note("the default policy".into());
+        plan.add_note("the context was not delivered".into());
+        assert_eq!(
+            plan.note.as_deref(),
+            Some("the default policy; the context was not delivered")
+        );
+    }
+
+    #[test]
+    fn a_reftable_stub_head_falls_back_to_the_slot_branch() {
+        let (home, primary, slot, id) = managed("continuity-context-reftable");
+        let admin = primary.join(".git").join("worktrees").join("slot-1");
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::write(slot.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+        std::fs::write(admin.join("HEAD"), "ref: refs/heads/.invalid\n").unwrap();
+
+        plan(
+            &home,
+            claim(&id, &slot),
+            &Harness::with_channel(SessionContinuity::Assigned),
+        );
+        let context = std::fs::read_to_string(context_file(&home, &primary)).unwrap();
+        assert!(!context.contains(".invalid"), "{context}");
+        let store = task::load(&home, &primary).unwrap();
+        let recorded = store.agents[0].isolation().unwrap().branch.clone();
+        assert!(
+            context.contains(&format!("`{recorded}`")),
+            "the record's branch: {context}"
+        );
+
+        // Naming the work updates the record, so a reftable checkout still
+        // says the new name.
+        let mut store = store;
+        let agent = store.agents[0].id.clone();
+        store
+            .get_mut(&agent)
+            .unwrap()
+            .take_name("fix/naming".into());
+        task::save(&home, &primary, &store).unwrap();
+        plan(
+            &home,
+            claim(&id, &slot),
+            &Harness::with_channel(SessionContinuity::Assigned),
+        );
+        let context = std::fs::read_to_string(context_file(&home, &primary)).unwrap();
+        assert!(context.contains("`fix/naming`"), "{context}");
+    }
+
+    #[test]
+    fn a_declaration_that_does_not_read_is_said_on_the_launch() {
+        let (home, primary, slot, id) = managed("continuity-context-unread");
+        std::fs::write(
+            primary.join("agents.yaml"),
+            "workspace:\n  delivery: sideways\n",
+        )
+        .unwrap();
+        let launch = plan(
+            &home,
+            claim(&id, &slot),
+            &Harness::with_channel(SessionContinuity::Assigned),
+        );
+        let note = launch.note.expect("the default is not given in silence");
+        assert!(note.contains("agents.yaml"), "{note}");
+        let context = std::fs::read_to_string(context_file(&home, &primary)).unwrap();
+        assert!(
+            context.contains(worktree::CompletionBehavior::instruction_clause(None)),
+            "the agent is still told how its work is delivered: {context}"
+        );
+    }
+
+    #[test]
+    fn the_instructions_name_the_branch_the_checkout_has_now() {
+        let (home, primary, slot, id) = managed("continuity-context-branch");
+        let admin = primary.join(".git").join("worktrees").join("slot-1");
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::write(slot.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+        std::fs::write(admin.join("HEAD"), "ref: refs/heads/fix/naming\n").unwrap();
+
+        plan(
+            &home,
+            claim(&id, &slot),
+            &Harness::with_channel(SessionContinuity::Assigned),
+        );
+        let context = std::fs::read_to_string(context_file(&home, &primary)).unwrap();
+        assert!(context.contains("`fix/naming`"), "{context}");
+    }
+
+    #[test]
+    fn an_agent_in_the_primary_checkout_is_told_it_is_on_the_operators_branch() {
+        let (home, primary, _slot, id) = managed("continuity-context-in-place");
+        let owner = conversation::Owner {
+            project_root: primary.clone(),
+            agent: AgentId::adopted(&id),
+            isolated: false,
+        };
+        let (text, _) = launch_instructions(&home, &owner, &primary);
+        assert!(text.contains("operator's own checkout"), "{text}");
+        assert!(!text.contains(".worktrees"), "{text}");
+        let _ = home;
+    }
+
+    #[test]
+    fn a_degraded_new_conversation_is_pointed_at_its_instructions_and_a_resume_at_nothing() {
+        let (home, primary, slot, id) = managed("continuity-context-degraded");
+        let harness = Harness::new(SessionContinuity::Assigned);
+
+        let first = plan(&home, claim(&id, &slot), &harness);
+        assert_eq!(first.trailing, instructions_turn_for(&home, &primary));
+
+        let resumed = plan(&home, claim(&id, &slot), &harness);
+        assert!(resumed.args.contains(&OsString::from("--resume")));
+        assert!(resumed.trailing.is_empty());
     }
 
     #[test]
@@ -893,8 +1277,10 @@ mod tests {
             plan(&home, claim(&id, &slot), &harness),
             LaunchPlan {
                 owned: true,
+                trailing: instructions_turn_for(&home, &primary),
                 ..LaunchPlan::nothing()
-            }
+            },
+            "no argument of its own: the only thing carried is the degraded turn"
         );
 
         let store = task::load(&home, &primary).unwrap();
@@ -1010,8 +1396,10 @@ mod tests {
             ),
             LaunchPlan {
                 owned: true,
+                trailing: instructions_turn_for(&home, &primary),
                 ..LaunchPlan::nothing()
-            }
+            },
+            "every launch of it is a new conversation, pointed at its instructions"
         );
         assert_eq!(recorded(&home, &primary), None);
     }

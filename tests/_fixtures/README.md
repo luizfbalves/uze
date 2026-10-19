@@ -26,8 +26,8 @@ old `packages/` set hard to reason about.
   `CARGO_BIN_EXE_uze-mcp-conformance-fixture` — see its `README.md`.
 - `multi-mcp-plugin/` — two MCP servers in one package; proves one package
   composes into N named resources.
-- `instructions-a/`, `instructions-b/` — packages contributing `AGENTS.md`
-  instruction regions; the two-package region/bridge scenarios use them.
+- `instructions-a/` — a plugin that still ships a root `AGENTS.md`, which
+  no release delivers; proves nothing of it reaches a project.
 - `flow/` — `flow` package with one Skill `commit`; the canonical
   marketplace/consumer example used all over lifecycle tests.
 - `workflow/` — `workflow` package with one Skill `review`; the
@@ -55,8 +55,8 @@ as its own format. One per vendor, minimal:
 
 ## scenarios/
 
-- `eval/` — the agentic model-behavioral evaluation set (healthy-portable,
-  drifted-region, …). L4 evidence: exercised by
+- `eval/` — the agentic model-behavioral evaluation set (left-by-an-earlier-release,
+  edited-plugin-block, …). L4 evidence: exercised by
   `docs/capabilities/uze-skill.md`'s manual/agentic eval, never CI.
 - `malformed-lock/` — `agents.lock` referencing a marketplace that does not
   exist.
@@ -114,3 +114,26 @@ The JPEG samples the code surface's image decoding is tested against,
 since nothing in the tree encodes JPEG: `rust.jpg` (16×8, one colour) and
 `gray.jpg` (8×8, one channel), made with `ffmpeg -f lavfi -i color=…`.
 Every other format those tests read is encoded inside the test itself.
+
+## rules/
+
+- `glob-dialect.tsv` — the project-rules glob dialect as one table of
+  pattern, path and expected answer (`match`, `no-match`, `invalid`), the
+  format described in its header. Read by uze-core's matcher
+  (`every_row_of_the_shared_dialect_table_holds` in
+  `crates/uze-core/src/project/rules/tests.rs`) and by the generated
+  rules engine's tests (`crates/uze-integrations/src/rules/engine_tests.rs`),
+  so both readers of a rule's `globs` are proven against the same rows. A `globs` value splits on the commas outside `{…}`
+  before any row applies.
+- `manifest/<case>/` — `.agents/rules.json` as one table of checkouts:
+  each case is a tree of rule files and a manifest (`{root}` in it stands
+  for the checkout root, so a case can hold an absolute entry), and
+  `expected` lists the rule identities every reader must answer with, in
+  order. Staged by `uze_testkit::fixtures::rules_manifest_cases` and read
+  by uze-core's discovery (`every_case_of_the_shared_manifest_table_holds`)
+  and by the engine (`the_engine_reads_the_manifest_as_the_rust_model_does`),
+  so the two readers of the manifest cannot part.
+- `payloads/` — hook payloads recorded per harness (Claude Code `Read`,
+  `Edit`, `Bash`; Codex `exec_command`, `apply_patch`; OpenCode `read`,
+  `edit`, `write`, `context`), which the engine's tests replay to prove path
+  recovery and what each event answers.

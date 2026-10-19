@@ -31,6 +31,26 @@ pub fn rename_branch_within(
     .map_err(|reason| crate::UzeError::TaskNaming(reason.to_string()))?
 }
 
+/// The branch checked out in `checkout`, read from its `HEAD` file rather
+/// than asked of Git: for a caller on the launch path, where a spawn per
+/// relaunch is a cost every agent pays. `None` for a detached `HEAD`, a
+/// checkout with no `.git`, or a ref store that keeps no `HEAD` file.
+pub fn branch_on_disk(checkout: &Path) -> Option<String> {
+    let dot_git = checkout.join(".git");
+    let git_dir = anchor::names(&dot_git)
+        .or_else(|| fs::metadata(&dot_git).ok()?.is_dir().then_some(dot_git))?;
+    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    head.trim()
+        .strip_prefix("ref: refs/heads/")
+        // A reftable repository keeps a stub `HEAD` naming `.invalid` for
+        // tools that read the file; the real ref is elsewhere.
+        .filter(|branch| !branch.is_empty() && *branch != REFTABLE_STUB)
+        .map(str::to_owned)
+}
+
+/// The branch a reftable repository's stub `HEAD` file names.
+const REFTABLE_STUB: &str = ".invalid";
+
 /// The branch checked out in `root`, or `None` for a detached `HEAD`.
 /// `symbolic-ref` rather than `rev-parse --abbrev-ref`: it still names the
 /// branch when it has no commit yet, which is the case that must be told
@@ -86,10 +106,10 @@ pub fn is_dirty(root: &Path) -> bool {
 /// Whether `root` holds uncommitted changes that are somebody's work — the
 /// question a checkout is shelved or freed by. Content UZE derives and can
 /// produce again is not: a lock that only gained or lost entries, which is
-/// all `install` does to it, and an instruction file that changed only
-/// inside the regions UZE manages. Left alone, those are what a slot
-/// collects just by having UZE run in it, and each held the slot for
-/// good. A question Git could not answer is taken as yes.
+/// all `install` does to it. Left alone, that is what a slot collects just
+/// by having UZE run in it, and it held the slot for good. `AGENTS.md` is
+/// never derived: UZE writes nothing into it in a slot, so any change to it
+/// there is somebody's. A question Git could not answer is taken as yes.
 pub fn holds_uncommitted_work(root: &Path) -> bool {
     let Some(status) = crate::git::read(root, &["status", "--porcelain=v1", "-z"])
         .ok()
@@ -105,9 +125,6 @@ pub fn holds_uncommitted_work(root: &Path) -> bool {
             Some((code, _)) if code.starts_with(['R', 'C']) => true,
             Some((_, path)) if path == crate::project_lock::LOCK_FILE_NAME => {
                 !lock_moves_no_pin(root)
-            }
-            Some((_, path)) if path == crate::project_context::AGENTS_MD_FILE_NAME => {
-                !instructions_changed_only_in_regions(root)
             }
             _ => true,
         })
@@ -145,7 +162,10 @@ pub(super) fn lock_moves_no_pin(root: &Path) -> bool {
     })
 }
 
-pub(super) fn instructions_changed_only_in_regions(root: &Path) -> bool {
+/// Whether `AGENTS.md` differs from `HEAD` only by the regions an earlier
+/// release wrote having been taken out, which is all `uze install` does to
+/// it in a main working tree.
+pub(super) fn instructions_changed_only_by_retiring_regions(root: &Path) -> bool {
     use crate::project_context::AGENTS_MD_FILE_NAME;
 
     let committed = match committed_text(root, AGENTS_MD_FILE_NAME) {
@@ -161,7 +181,11 @@ pub(super) fn instructions_changed_only_in_regions(root: &Path) -> bool {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(_) => return false,
     };
-    crate::text_region::same_outside_managed_regions(&committed, &working)
+    let retired = |identity: &str| {
+        crate::retired_region::is_retired(identity)
+            || crate::retired_region::is_retired_package(identity)
+    };
+    committed != working && crate::text_region::without_regions(&committed, retired) == working
 }
 
 pub(super) enum Committed {

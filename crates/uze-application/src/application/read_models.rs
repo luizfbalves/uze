@@ -386,7 +386,7 @@ pub struct HarnessDelivery {
     /// Paths of the package this harness would load as components no
     /// canonical capability defines, and so never receives.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub withheld: Vec<String>,
+    pub withheld: Vec<uze_core::integration::WithheldPath>,
 }
 
 /// When a plugin was last written, as something a person can place in
@@ -543,6 +543,11 @@ pub struct AddPluginReport {
     /// What a harness holds back of this delivery until the person acts in
     /// it — said at install, the moment the person is there to act.
     pub held_back: Vec<HeldBackNote>,
+    /// What happened to the plugin's rules in the declaring project's
+    /// checkout. `None` when no project declared it, or there was nothing
+    /// to say.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules: Option<crate::application::RuleCopies>,
 }
 
 impl AddPluginReport {
@@ -599,6 +604,9 @@ pub struct SetupResult {
     /// Also non-fatal: the harness setup completed, the shim just couldn't be
     /// wired.
     pub shim_error: Option<String>,
+    /// How the harness receives a project's rules, and what this setup
+    /// delivered for them; `None` where setup did not get that far.
+    pub rules: Option<RulesSetup>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -717,11 +725,14 @@ pub enum ContextMechanism {
     /// The workspace would project it through a shim `uze setup` has not
     /// created yet.
     ShimMissing,
-    /// A persistent bridge file in the project root, maintained by
-    /// `uze agent context reconcile`, carries it.
-    Bridge,
     /// No delivery strategy exists for this harness and this resource.
     Unsupported,
+    /// The rules engine `uze setup` delivers hands the project's rules over,
+    /// inside the workspace or outside it.
+    RulesEngine,
+    /// The rules engine would hand them over, but `uze setup` has not
+    /// delivered it to this harness yet.
+    RulesEngineMissing,
 }
 
 /// One harness's declared context support, one mechanism per portable
@@ -735,13 +746,20 @@ pub struct HarnessContextSupport {
     pub project_skills: ContextMechanism,
     /// `.agents/agents`.
     pub project_agents: ContextMechanism,
+    /// `.agents/rules`.
+    pub project_rules: ContextMechanism,
 }
 
 impl HarnessContextSupport {
     /// Derives the declaration from the integration's own answers plus the
-    /// one fact that can defeat them: whether its shim exists
-    /// (`runtime_shim_active`).
-    pub fn declared(integration: &dyn IntegrationPort, runtime_shim_active: bool) -> Self {
+    /// facts that can defeat them: whether its shim exists
+    /// (`runtime_shim_active`) and whether setup delivered the rules engine
+    /// to it (`rules_engine_delivered`).
+    pub fn declared(
+        integration: &dyn IntegrationPort,
+        runtime_shim_active: bool,
+        rules_engine_delivered: bool,
+    ) -> Self {
         let projection = RuntimeProjection::of(integration, runtime_shim_active);
         Self {
             instructions: ContextMechanism::for_instructions(integration, projection),
@@ -755,6 +773,7 @@ impl HarnessContextSupport {
                 AgentsDirectoryResource::Agents,
                 projection,
             ),
+            project_rules: ContextMechanism::for_rules(integration, rules_engine_delivered),
         }
     }
 }
@@ -787,9 +806,22 @@ impl RuntimeProjection {
     }
 }
 
-/// The one precedence every context read model applies: what the harness
-/// reads itself, then a runtime projection, then a persistent bridge.
+/// The one precedence every context read model applies: a runtime
+/// projection where the workspace makes one, then what the harness reads
+/// itself. A harness that declares a bridge file reads `AGENTS.md` itself:
+/// no bridge is written for it any more.
 impl ContextMechanism {
+    /// How the project's rules reach the harness: read by the harness
+    /// itself, handed over by the engine setup delivers, or not at all.
+    pub(crate) fn for_rules(integration: &dyn IntegrationPort, engine_delivered: bool) -> Self {
+        match integration.rules_route().route {
+            uze_core::router::CompatibilityRoute::Native => Self::Native,
+            uze_core::router::CompatibilityRoute::Unsupported => Self::Unsupported,
+            _ if engine_delivered => Self::RulesEngine,
+            _ => Self::RulesEngineMissing,
+        }
+    }
+
     pub(crate) fn for_instructions(
         integration: &dyn IntegrationPort,
         projection: RuntimeProjection,
@@ -798,8 +830,7 @@ impl ContextMechanism {
             (ContextDelivery::Native { .. }, _) => Self::Native,
             (ContextDelivery::None, _) => Self::Unsupported,
             (ContextDelivery::Bridge { .. }, RuntimeProjection::Active) => Self::RuntimeShim,
-            (ContextDelivery::Bridge { .. }, RuntimeProjection::Missing) => Self::ShimMissing,
-            (ContextDelivery::Bridge { .. }, RuntimeProjection::Inactive) => Self::Bridge,
+            (ContextDelivery::Bridge { .. }, _) => Self::Native,
         }
     }
 
@@ -840,16 +871,10 @@ pub struct InstructionSourceObservation {
 pub enum HarnessContextDelivery {
     /// Reads the shared `AGENTS.md` directly; nothing else is needed.
     Native,
-    /// Needs a bridge region in its own file. `needed` is whether
-    /// `AGENTS.md` currently carries at least one matched contribution
-    /// worth bridging to; `state` is the bridge region's own observed
-    /// state, checked regardless of whether it is currently needed (an
-    /// unneeded-but-present bridge is real, reportable state, not silently
-    /// folded into "needed").
-    Bridge {
-        needed: bool,
-        state: AttachmentState,
-    },
+    /// Reads the shared `AGENTS.md` itself, beside a native file of its
+    /// own that an earlier release bridged it into. Nothing is needed: a
+    /// bridge left behind is a retired region, reported with the others.
+    ReadsNatively,
     /// UZE's runtime shim projects `AGENTS.md` into every launch from here,
     /// so a missing bridge is not a gap.
     Projected,
@@ -876,13 +901,9 @@ pub struct HarnessContextStatus {
 pub enum Portability {
     /// No recognized instructions file exists at all.
     NoContext,
-    /// A shared `AGENTS.md` exists and every detected harness that needs
-    /// something from it currently has it (natively, through the runtime
-    /// shim, or via a matched bridge).
+    /// A shared `AGENTS.md` exists, and every harness that reads project
+    /// instructions reads it, natively or through the runtime shim.
     Portable,
-    /// A shared `AGENTS.md` exists, but at least one detected harness that
-    /// needs a bridge does not currently have a working one.
-    PartiallyPortable { gaps: Vec<String> },
     /// No shared `AGENTS.md` exists, but one or more vendor-specific files
     /// hold their own content — the original problem this capability set
     /// out to make visible.
@@ -894,9 +915,10 @@ pub struct ProjectContextStatus {
     pub root: PathBuf,
     pub canonical: PathBuf,
     pub sources: Vec<InstructionSourceObservation>,
-    pub contributions: Vec<PackageInstructionStatus>,
-    pub orphaned_regions: Vec<String>,
-    pub malformed_regions: Vec<String>,
+    /// Regions an earlier release wrote, present only until the main
+    /// working tree's `uze install` removes them. `None` in a linked
+    /// worktree, where the files are the branch's.
+    pub retired_regions: Option<RetiredRegionsPlan>,
     pub harnesses: Vec<HarnessContextStatus>,
     pub portability: Portability,
     /// Human-readable notices for a state worth surfacing but that is not
@@ -906,84 +928,86 @@ pub struct ProjectContextStatus {
     pub warnings: Vec<String>,
 }
 
-/// The planned change to one region UZE owns in `AGENTS.md`.
+/// The regions an earlier release wrote into `AGENTS.md` that this pass
+/// would take out, and the ones it would leave.
 #[derive(Clone, Debug, Serialize)]
-pub struct ManagedRegionPlan {
+pub struct RetiredRegionsPlan {
     pub file: PathBuf,
-    pub action: instruction_context::PlannedAction,
-    /// Versions of the region an earlier text left, which this pass would
-    /// remove. A change of text reads as one region going stale and another
-    /// appearing, never as drift inside the region that already exists.
-    pub superseded: Vec<String>,
+    /// Regions still holding what they were written with.
+    pub remove: Vec<String>,
+    /// Regions edited by hand or malformed, with why each stays.
+    pub keep: Vec<(String, String)>,
+    /// The `@AGENTS.md` bridges in harnesses' own files, which go once no
+    /// package region is left.
+    pub bridges: Vec<RetiredBridge>,
 }
 
-/// What converging one region UZE owns in `AGENTS.md` did.
-#[derive(Clone, Debug, Serialize)]
-pub struct ManagedRegionStatus {
-    pub file: PathBuf,
-    pub state: AttachmentState,
-    pub reason: String,
-    pub removed_superseded: Vec<String>,
-    /// A superseded region whose markers were malformed, so ownership could
-    /// not be proven and nothing was removed.
-    pub blocked_superseded: Vec<(String, String)>,
+impl RetiredRegionsPlan {
+    /// Whether removing them would change a file.
+    pub fn has_changes(&self) -> bool {
+        !self.remove.is_empty()
+            || self
+                .bridges
+                .iter()
+                .any(|bridge| !matches!(bridge.fate, BridgeFate::Kept(_)))
+    }
 }
 
+/// The bridge an earlier release wrote into one harness's own file.
 #[derive(Clone, Debug, Serialize)]
-pub struct BridgePlan {
-    pub integration: String,
+pub struct RetiredBridge {
     pub file: PathBuf,
-    pub action: instruction_context::PlannedAction,
+    pub fate: BridgeFate,
+}
+
+/// What goes of a retired bridge: planned, or done.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "fate", content = "reason", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum BridgeFate {
+    /// The region, and the operator's lines beside it stay.
+    Region,
+    /// The whole file, which held nothing but the region.
+    File,
+    /// Nothing: the region was edited or its markers are malformed.
+    Kept(String),
+}
+
+/// What removing the regions an earlier release wrote did.
+#[derive(Clone, Debug, Serialize)]
+pub struct RetiredRegionsStatus {
+    pub file: PathBuf,
+    pub removed: Vec<String>,
+    /// Regions left where they are, with why: an edit by hand is the
+    /// operator's text now.
+    pub kept: Vec<(String, String)>,
+    pub bridges: Vec<RetiredBridge>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ContextPlan {
     pub agents_md: PathBuf,
-    pub agents_md_plan: instruction_context::AgentsMdPlan,
-    /// The package manager's plugin-authoring region, present for a project
-    /// with an `agents.yaml`.
-    pub authoring_region: Option<ManagedRegionPlan>,
-    pub bridges: Vec<BridgePlan>,
+    /// Regions an earlier release wrote, present only until they are
+    /// removed.
+    pub retired_regions: Option<RetiredRegionsPlan>,
 }
 
 impl ContextPlan {
     pub fn has_changes(&self) -> bool {
-        self.agents_md_plan.has_changes()
-            || self
-                .authoring_region
-                .as_ref()
-                .is_some_and(|region| is_mutating(&region.action) || !region.superseded.is_empty())
-            || self
-                .bridges
-                .iter()
-                .any(|bridge| is_mutating(&bridge.action))
+        self.retired_regions
+            .as_ref()
+            .is_some_and(RetiredRegionsPlan::has_changes)
     }
 }
 
-/// Whether a planned region action would actually write. `Blocked` is not
-/// mutating: it is a reason nothing can be applied, and reporting it as a
-/// pending change would make `agent context plan` claim work that `reconcile`
-/// will refuse to do.
-fn is_mutating(action: &instruction_context::PlannedAction) -> bool {
-    matches!(
-        action,
-        instruction_context::PlannedAction::Attach | instruction_context::PlannedAction::Remove
-    )
-}
-
 /// The project's shared instruction file, as `uze status` carries it.
-/// Deliberately three facts and not the source's full observation: a
-/// person needs to know which document this is, whether it is there, and
-/// how much of it UZE owns — the regions themselves are
-/// `agent context inspect`'s answer.
+/// Deliberately two facts and not the source's full observation: a
+/// person needs to know which document this is and whether it is there.
+/// The file is the operator's alone; what an earlier release left in it is
+/// [`EnvironmentDrift::stale_projection`].
 #[derive(Clone, Debug, Serialize)]
 pub struct InstructionsFile {
     pub path: PathBuf,
     pub exists: bool,
-    /// How many managed regions UZE owns in it: each installed package's
-    /// contribution, the authoring region, and the workspace's policy
-    /// region when the workspace keeps one there.
-    pub managed_regions: usize,
 }
 
 /// A project-scoped health summary. See `UzeApplication::status` for why
@@ -1000,16 +1024,13 @@ pub struct StatusReport {
     pub portability: Portability,
     pub harnesses: Vec<StatusHarness>,
     pub packages_installed: usize,
-    /// The installed packages whose instructions this project's `AGENTS.md`
-    /// carries a region for, by package id.
-    pub packages_contributing_here: Vec<String>,
     pub project_lock: ProjectLockStatus,
     /// What `agents.yaml` asks for that the rest of the chain has not
     /// caught up to. Empty when the declaration, the lock, the Store and
     /// the projection all agree.
     pub drift: EnvironmentDrift,
-    /// Human-readable, one-line-each context problems: a non-matched
-    /// contribution, a bridge gap, a malformed or blocked orphan region.
+    /// Human-readable, one-line-each context problems the project itself
+    /// has, such as rules that do not validate.
     /// What concerns one harness alone is on that harness instead, so the
     /// project is healthy when this is empty and no harness carries
     /// [`StatusHarness::context_unread`] or [`StatusHarness::outdated`].
@@ -1023,6 +1044,13 @@ pub struct StatusReport {
     /// What agents and the operator keep for this project and the machine,
     /// with the harnesses' own entries beside UZE's.
     pub memory: crate::application::memory::MemoryReport,
+    /// The checkout's rules, read by the same validator `uze agent rules
+    /// check` runs. `None` only when the directory could not be read,
+    /// which is then one of [`Self::issues`].
+    pub rules: Option<crate::application::RulesReport>,
+    /// The rules each declared plugin gives this project, judged against
+    /// the revision `agents.lock` pins.
+    pub plugin_rules: crate::application::PluginRulesReport,
 }
 
 /// One registered harness as `uze status` reports it, keyed by integration
@@ -1045,6 +1073,17 @@ pub struct StatusHarness {
     /// The sentence saying the detected harness is older than its
     /// integration supports.
     pub outdated: Option<String>,
+    /// How the project's rules reach the detected harness.
+    pub rules: Option<StatusRulesRoute>,
+}
+
+/// How a project's rules reach one harness, in the words `status` shows.
+#[derive(Clone, Debug, Serialize)]
+pub struct StatusRulesRoute {
+    /// `native`, `engine` (the rules engine setup delivers) or
+    /// `unsupported`.
+    pub route: &'static str,
+    pub reason: String,
 }
 
 /// What `uze status` answers inside a project: the package manager's
@@ -1095,8 +1134,8 @@ pub struct EnvironmentDrift {
     pub surplus: Vec<String>,
     /// Recorded in the lock and absent from this machine's Store.
     pub missing: Vec<String>,
-    /// A region the package manager owns in `AGENTS.md` is not what it
-    /// should say.
+    /// `AGENTS.md`, or a harness's file bridged to it, still carries a
+    /// region an earlier release wrote, which `uze install` removes.
     pub stale_projection: bool,
     /// Marketplaces that resolve nowhere but the machine that declared
     /// them. Carried here so `uze status` and the overview say the same
@@ -1129,37 +1168,11 @@ impl EnvironmentDrift {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct PackageInstructionStatus {
-    pub package_id: String,
-    pub state: AttachmentState,
-    pub reason: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct BridgeStatus {
-    pub integration: String,
-    pub file: PathBuf,
-    pub state: AttachmentState,
-    pub reason: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
 pub struct ContextReconciliationReport {
     pub agents_md: PathBuf,
-    pub packages: Vec<PackageInstructionStatus>,
-    /// Regions this pass removed because no currently-installed package
-    /// claims them any more. See `text_region::remove_unconditionally` for
-    /// the exact (structural, not content-drift-verified) safety guarantee
-    /// this carries.
-    pub removed_orphans: Vec<String>,
-    /// An orphaned-looking region this pass found but refused to touch —
-    /// its markers were malformed, so ownership could not be proven.
-    pub blocked_orphans: Vec<(String, String)>,
-    /// A package whose region this pass could not write, with the reason —
-    /// distinct from a region that is merely absent.
-    pub failed: Vec<(String, String)>,
-    pub authoring_region: Option<ManagedRegionStatus>,
-    pub bridges: Vec<BridgeStatus>,
+    /// What removing the regions an earlier release wrote did; `None` when
+    /// there were none, or in a linked worktree.
+    pub retired_regions: Option<RetiredRegionsStatus>,
 }
 
 #[derive(Clone, Debug, Serialize)]

@@ -31,6 +31,7 @@
 //! out rather than delivered with a meaning its author did not declare.
 
 use std::{fs, path::Path};
+use uze_core::integration::WithheldPath;
 
 use uze_core::{
     Result, UzeError,
@@ -70,12 +71,16 @@ pub(super) const NOT_PORTABLE: &[&str] = &[
 
 /// Every [`NOT_PORTABLE`] path `package` contains, save the manifest
 /// directory: that one is generated rather than left out.
-pub(super) fn withheld_paths(package: &StoredPackage) -> Vec<String> {
+pub(super) fn withheld_paths(package: &StoredPackage) -> Vec<WithheldPath> {
     NOT_PORTABLE
         .iter()
         .filter(|path| **path != ".claude-plugin")
         .filter(|path| fs::symlink_metadata(package.root.join(path)).is_ok())
-        .map(|path| (*path).to_owned())
+        .map(|path| WithheldPath {
+            path: (*path).to_owned(),
+            reason: "no portable equivalent".to_owned(),
+        })
+        .chain(crate::rules::withheld(package))
         .collect()
 }
 
@@ -85,7 +90,8 @@ pub(super) fn withheld_paths(package: &StoredPackage) -> Vec<String> {
 pub(super) fn materialize_envelope(package: &StoredPackage, dir: &Path) -> Result<()> {
     let package_root =
         uze_core::path::canonical(&package.root).map_err(UzeError::read(&package.root))?;
-    mirror_tree(&package.root, dir, &package_root, NOT_PORTABLE)?;
+    let excluded = [NOT_PORTABLE, &[crate::rules::PACKAGE_RULES_DIR]].concat();
+    mirror_tree(&package.root, dir, &package_root, &excluded)?;
     write_manifest(package, dir)?;
     let resources = uze_core::engine::package_resources_at(&package.id, &package.root)?;
     for resource in &resources {
@@ -1039,6 +1045,7 @@ mod generated_native_tests {
             ("commands/legacy.md", "legacy"),
             (".mcp.json", "{}"),
             ("settings.json", "{}"),
+            ("rules/ui.md", "---\ntrigger: always_on\n---\nUI\n"),
         ] {
             let file = pkg.root.join(path);
             fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -1063,6 +1070,21 @@ mod generated_native_tests {
                 "{excluded} is a Claude-only component and is never delivered"
             );
         }
+        assert!(
+            !dir.join("rules").exists(),
+            "a package's rules never ride a plugin installed for every project"
+        );
+        let withheld = super::withheld_paths(&pkg);
+        let rules = withheld
+            .iter()
+            .find(|withheld| withheld.path == "rules")
+            .unwrap();
+        assert!(rules.reason.contains("per project"), "{}", rules.reason);
+        assert!(
+            rules.reason.contains(&format!("`uze {}`", pkg.id.as_str())),
+            "the machine scope names the command that declares the plugin in a project: {}",
+            rules.reason
+        );
         let _ = fs::remove_dir_all(_root);
     }
 

@@ -253,6 +253,7 @@ impl Health<'_> {
                     subject: concern.subject.to_owned(),
                     detail: concern.detail,
                 })
+                .chain(self.0.rules_engine_concerns())
                 .collect(),
         }
     }
@@ -306,7 +307,11 @@ impl Health<'_> {
             publication: integration.publication(installed),
             capabilities: integration.capabilities(),
             runtime_shim_active,
-            context_support: HarnessContextSupport::declared(integration, runtime_shim_active),
+            context_support: HarnessContextSupport::declared(
+                integration,
+                runtime_shim_active,
+                self.0.rules_engine_delivered(integration),
+            ),
             agent_context: agent_context_shortfall(integration),
         }
     }
@@ -355,11 +360,6 @@ impl Health<'_> {
     pub fn status(&self, project_root: &std::path::Path) -> Result<StatusReport> {
         let context = self.0.context().inspect(project_root)?;
         let installed = self.0.store.package_ids()?.len();
-        let contributing = context
-            .contributions
-            .iter()
-            .map(|contribution| contribution.package_id.clone())
-            .collect();
         let agents_md = context
             .canonical
             .join(uze_core::project_context::AGENTS_MD_FILE_NAME);
@@ -389,35 +389,21 @@ impl Health<'_> {
                     }),
                     agent_context: detected(&|| agent_context_shortfall(integration)),
                     outdated: super::harness_floor::sentence(integration, &detection),
+                    rules: detection.present.then(|| {
+                        let route = integration.rules_route();
+                        StatusRulesRoute {
+                            route: match route.route {
+                                uze_core::router::CompatibilityRoute::Native => "native",
+                                uze_core::router::CompatibilityRoute::Unsupported => "unsupported",
+                                _ => "engine",
+                            },
+                            reason: route.reason,
+                        }
+                    }),
                 }
             })
             .collect();
-        let issues: Vec<String> = context
-            .contributions
-            .iter()
-            .filter(|contribution| !matches!(contribution.state, AttachmentState::Matched))
-            .map(|contribution| format!("{}: {:?}", contribution.package_id, contribution.state))
-            .chain(
-                context
-                    .harnesses
-                    .iter()
-                    .filter_map(|harness| match &harness.delivery {
-                        HarnessContextDelivery::Bridge {
-                            needed: true,
-                            state,
-                        } if *state != AttachmentState::Matched => {
-                            Some(format!("{}: bridge {:?}", harness.display_name, state))
-                        }
-                        _ => None,
-                    }),
-            )
-            .chain(
-                context
-                    .malformed_regions
-                    .iter()
-                    .map(|region| format!("{region}: malformed")),
-            )
-            .collect();
+        let mut issues: Vec<String> = Vec::new();
         // Read out of the sources the inspection already observed rather
         // than asked of the filesystem again: `status` and `agent context
         // inspect` must never disagree about whether the file is there.
@@ -431,12 +417,10 @@ impl Health<'_> {
                         .canonical
                         .join(uze_core::project_context::AGENTS_MD_FILE_NAME),
                     exists: false,
-                    managed_regions: 0,
                 },
                 |source| InstructionsFile {
                     path: source.path.clone(),
                     exists: source.exists,
-                    managed_regions: source.managed_region_identities.len(),
                 },
             );
         let project_lock = self.0.project().lock_status(project_root);
@@ -449,14 +433,22 @@ impl Health<'_> {
             .plan(project_root)
             .map(|plan| EnvironmentDrift::from(&plan))
             .unwrap_or_default();
+        let rules = self
+            .0
+            .project()
+            .rules(&context.canonical)
+            .map_err(|error| issues.push(format!("rules: {error}")))
+            .ok();
+        let plugin_rules = self.0.project().plugin_rules(project_root);
         Ok(StatusReport {
+            rules,
+            plugin_rules,
             root: context.canonical.clone(),
             instructions,
             drift,
             portability: context.portability,
             harnesses,
             packages_installed: installed,
-            packages_contributing_here: contributing,
             project_lock,
             issues,
             held_back: held_back_notes(self.0, None),
@@ -494,16 +486,17 @@ fn package_store_inconsistency(package: &StoredPackage) -> Option<String> {
 /// context invisibly, if it is not: no channel at all, or one that cannot
 /// run on this machine right now.
 pub(crate) fn agent_context_shortfall(integration: &dyn IntegrationPort) -> Option<String> {
+    const FIRST_TURN: &str = "each new conversation is pointed at its instructions (and a \
+         switched agent's briefing) by a visible first turn, and no memory is given";
     if let Some(reason) = integration.context_channel_unavailable() {
         return Some(format!(
-            "agent context (memory and briefings) does not reach it ({reason})"
+            "agent context does not reach it invisibly ({reason}): {FIRST_TURN}"
         ));
     }
-    integration.context_channel().is_degraded().then(|| {
-        "agent context does not reach it: no memory is given, and a switched agent is pointed \
-         at its briefing by a visible first turn"
-            .to_owned()
-    })
+    integration
+        .context_channel()
+        .is_degraded()
+        .then(|| format!("agent context does not reach it invisibly: {FIRST_TURN}"))
 }
 
 #[cfg(test)]

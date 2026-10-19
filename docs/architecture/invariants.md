@@ -107,25 +107,28 @@ CLI/TUI.
 
 ### Project-context delivery is declared per integration
 
-Which harness reads the shared `AGENTS.md` natively, which needs an
-`@AGENTS.md` bridge region, and which additional native files are
-observed for portability reporting is each integration's
-`context_delivery()` declaration — never an Application-owned vendor
-list. The bridge protocol itself (region identity, import line) is the
-Application's, shared by every bridge-needing harness.
+Which harness reads the shared `AGENTS.md` natively, which keeps a file
+of its own beside it (where an earlier release wrote an `@AGENTS.md`
+bridge), and which additional native files are observed for portability
+reporting is each integration's `context_delivery()` declaration, never
+an Application-owned vendor list. No bridge is written for any of them.
 
 > `tests/memory/inspection.rs` scenarios A–F (stub harness declares its
-> bridge exactly like a real integration)
+> own file exactly like a real integration)
+> `tests/memory/inspection.rs::agents_md_alone_is_portable_and_claude_reads_it_with_no_bridge`
 
-### A package's instructions reach only a project that declares it
+### A plugin speaks to a project through rules, never through `AGENTS.md`
 
-`AGENTS.md` carries a region for a package only when the project's
-`agents.yaml` declares it. The Store is the machine's, so composing from
-everything installed would make a versioned file depend on which machine
-last reconciled it; a package dropped from the declaration loses its region
-on the next reconcile while it stays installed.
+A plugin's root `AGENTS.md` is not a capability: nothing composes it into
+a project, and `uze agent plugin check` warns that it is not delivered,
+naming an `always_on` rule. `uze agent plugin create --instructions` is
+refused with the same pointer.
 
-> `tests/memory/reconciliation.rs::only_a_declared_package_s_instructions_reach_the_project`
+> `crates/uze-core/src/delivery/engine.rs::discovery_tests::a_root_agents_md_is_not_a_capability`
+> `tests/memory/reconciliation.rs::a_declared_plugin_shipping_agents_md_adds_nothing_to_the_project`
+> `tests/packages/canonical_model.rs::installing_and_reconciling_never_touch_the_operators_agents_md`
+> `crates/uze-core/src/package/authoring/tests.rs::check_reports_a_root_agents_md_as_not_delivered_and_names_the_rule`
+> `tests/cli/machine.rs::plugin_create_refuses_instructions_and_names_an_always_on_rule`
 
 ### Native means preserved semantics, not identical primitives (ADR-030)
 
@@ -634,6 +637,105 @@ however the directories on the way are linked.
 > `crates/uze-workspace/src/checkout/tests.rs::an_isolation_directory_the_repository_tracks_is_refused`
 > `crates/uze-application/src/application/services/artifacts.rs::an_entry_linked_out_of_the_project_refuses_the_declaration`
 > `src/ui/extension_host.rs::no_write_reaches_through_a_directory_linked_out_of_the_root`
+
+### No rules directory is written into a project
+
+A project's rules live in one directory it authors, `.agents/rules/`, and
+UZE only reads the project's own files there (it writes nothing but a
+declared plugin's copies, under that plugin's prefix, below): neither the
+check nor `status` writes a byte into the checkout, no harness is given a second rules directory there
+(`.claude/rules/` or any other), and reading an absent directory creates
+nothing. The rules engine setup delivers writes only machine files, beside
+each harness's foreign hooks and plugins, and Antigravity, which reads the
+directory itself, is given nothing.
+
+> `tests/acceptance/project_rules.rs::reading_rules_writes_nothing_into_the_project`
+> `crates/uze-core/src/project/rules/tests.rs::a_checkout_without_a_rules_directory_has_no_rules_and_nothing_wrong`
+> `crates/uze-integrations/src/rules/tests.rs::antigravity_is_left_to_its_own_rules`
+> `crates/uze-integrations/src/rules/tests.rs::claude_receives_exec_form_entries_beside_its_foreign_hooks`
+> `crates/uze-integrations/src/rules/tests.rs::opencode_receives_a_generated_plugin_and_no_config_entry`
+
+### The rules engine fails open and reads only the session's checkout
+
+The engine `uze setup` delivers never denies or delays a tool call: missing
+`jq` or Git, an unknown payload, a file that is not a rule or a session id
+it cannot use each answer nothing and let the call proceed. It reads the
+rules of the checkout the session stands in, paths outside it are
+discarded, and a checkout without rules costs one directory check.
+
+> `crates/uze-integrations/src/rules/engine_tests.rs::every_failure_lets_the_call_proceed_with_nothing_added`
+> `crates/uze-integrations/src/rules/engine_tests.rs::a_file_that_is_not_a_rule_is_skipped_and_the_rules_beside_it_still_answer`
+> `crates/uze-integrations/src/rules/engine_tests.rs::paths_are_read_relative_to_the_session_and_never_outside_the_checkout`
+> `crates/uze-integrations/src/rules/engine_tests.rs::a_checkout_without_rules_or_outside_git_pays_nothing`
+> `crates/uze-integrations/src/rules/engine_tests.rs::each_checkout_is_answered_with_its_own_rules`
+
+### Every reader of a rule's patterns agrees on what matched
+
+`uze-core`'s matcher and the engine's translation are proven against one
+shared table, under every `awk` the machine has, and the dialect is the
+intersection Antigravity measured: a pattern opens with `**/` or names a
+file, and anything else is refused rather than delivered to some harnesses.
+
+> `crates/uze-core/src/project/rules/tests.rs::every_row_of_the_shared_dialect_table_holds`
+> `crates/uze-integrations/src/rules/engine_tests.rs::the_engine_answers_the_shared_glob_table_under_every_awk_here`
+
+### Every reader of `.agents/rules.json` registers the same rules
+
+`uze-core`'s discovery and the engine read the manifest as Antigravity
+measured it: each entry's path relative to the checkout root, a folder's
+immediate `*.md`, `include_only` and `exclude` relative to the entry, a file
+registered twice one rule, and nothing at all from a manifest that does not
+parse. One shared table of checkouts holds both readers to the same rules in
+the same order.
+
+> `crates/uze-core/src/project/rules/tests.rs::every_case_of_the_shared_manifest_table_holds`
+> `crates/uze-integrations/src/rules/engine_tests.rs::the_engine_reads_the_manifest_as_the_rust_model_does`
+> `crates/uze-core/src/project/rules/tests.rs::a_manifest_that_does_not_parse_adds_nothing_and_is_reported`
+
+### A plugin's rules reach only a project that declares it
+
+A package's `rules/` rides no machine-wide envelope on any harness, and a
+machine install writes into no project. A project receives the rules only by
+declaring the plugin, as byte-identical copies in a folder of the plugin's
+own, `.agents/rules/<plugin>@<market>/<rule>.md`; nothing is written into the
+project's own rules or another plugin's folder, and a second project on the
+same machine that does not declare the plugin receives nothing.
+
+> `tests/project/plugin_rules.rs::rules_land_byte_for_byte_in_the_declaring_project_only`
+> `tests/project/plugin_rules.rs::a_machine_install_writes_into_no_project`
+> `crates/uze-core/src/project/rules/plugin/tests.rs::install_writes_byte_for_byte_and_never_touches_the_projects_own_rule`
+> `crates/uze-integrations/src/claude/generate.rs::the_envelope_is_the_package_minus_what_is_not_portable`
+
+### A drifted plugin rule copy is never overwritten
+
+A copy is judged against the plugin's rule at the revision `agents.lock`
+pins, from the project alone: a fresh machine acquires that revision
+read-only to judge a clone, and reports the copies unverified when it
+cannot. A copy that matches neither the revision it was locked at nor the
+new one is somebody's edit: install, update and remove name it and leave it
+byte for byte, a link at a copy's path is never written through, and only a
+missing copy is written back.
+
+> `tests/project/plugin_rules.rs::a_hand_edit_survives_install_and_a_deleted_copy_is_restored`
+> `tests/project/plugin_rules.rs::an_update_refuses_to_overwrite_or_remove_a_drifted_copy`
+> `tests/project/plugin_rules.rs::a_fresh_machine_judges_a_cloned_project_without_installing`
+> `crates/uze-core/src/project/rules/plugin/tests.rs::a_copy_that_is_a_link_is_never_written_through`
+
+### UZE owns its entries of `.agents/rules.json`, never the file
+
+The folder a plugin's rules are copied to is registered by one entry UZE
+writes, added before the first copy and taken back once the folder holds
+nothing. Every other entry and key is written back unchanged and in order, a
+folder the operator registered is left as they wrote it, a manifest that
+does not parse is never written and no copy that needs it is made, and the
+manifest goes once nothing else is left in it.
+
+> `crates/uze-core/src/project/rules/manifest/tests.rs::the_operators_entries_and_keys_are_written_back_in_their_order`
+> `crates/uze-core/src/project/rules/manifest/tests.rs::a_manifest_that_does_not_parse_is_never_written`
+> `crates/uze-core/src/project/rules/manifest/tests.rs::a_folder_the_operator_registered_is_left_as_they_wrote_it`
+> `tests/project/plugin_rules.rs::the_operators_entries_are_kept`
+> `tests/project/plugin_rules.rs::an_unreadable_manifest_is_never_written`
+> `tests/project/plugin_rules.rs::removing_the_last_plugin_takes_its_entry_back`
 
 ### A generated file is never written through a link
 
@@ -1594,17 +1696,19 @@ not held for its life.
 ### Content UZE derives is never work
 
 Deciding whether a checkout holds work, and what goes on its shelf, a lock
-that only gained or lost entries and an instruction file changed only inside
-UZE's managed regions are not work: they are what a slot collects by having
-UZE run in it. A lock that moves a plugin's pin is work, since moving pins is
-what `update` exists for, and is shelved. Rebasing, joining and delivering
-still require a tree with nothing uncommitted at all.
+that only gained or lost entries is not work: it is what a slot collects by
+having UZE run in it. A lock that moves a plugin's pin is work, since moving
+pins is what `update` exists for, and is shelved. `AGENTS.md` is never
+derived: UZE writes nothing into it in a slot, so any change to it there,
+inside an old region or beside one, is somebody's work. Rebasing, joining
+and delivering still require a tree with nothing uncommitted at all.
 
 > `crates/uze-workspace/src/checkout/accounting_tests.rs::a_lock_that_only_gained_an_entry_leaves_the_slot_free`
 > `crates/uze-workspace/src/checkout/accounting_tests.rs::a_moved_pin_is_shelved`
-> `crates/uze-workspace/src/checkout/accounting_tests.rs::a_reprojected_region_leaves_the_slot_free`
+> `crates/uze-workspace/src/checkout/accounting_tests.rs::a_change_inside_a_region_is_shelved`
+> `crates/uze-workspace/src/checkout/accounting_tests.rs::a_retired_region_removed_in_a_slot_is_shelved`
 > `crates/uze-workspace/src/checkout/accounting_tests.rs::a_hand_edit_beside_a_region_is_shelved`
-> `crates/uze-workspace/src/checkout/shelf_tests.rs::a_managed_region_alone_is_not_shelved_and_a_hand_edit_is`
+> `crates/uze-workspace/src/checkout/shelf_tests.rs::a_change_inside_a_region_is_shelved_like_any_other`
 
 ### An agent's work is kept in Git, never in a checkout
 
@@ -1846,26 +1950,26 @@ launch.
 > `crates/uze-workspace/src/declaration.rs::a_link_to_a_tracked_file_is_rejected_and_an_ignored_one_loads`
 > `crates/uze-workspace/src/checkout/tests.rs::a_failing_setup_warns_with_its_last_line_and_a_passing_one_is_silent`
 
-### The projection never triggers a harness's own isolation
+### The instructions never trigger a harness's own isolation
 
-The text projected into the shared baseline states where the reader already
-is and how to isolate a subagent; it never asks for a top-level worktree. A
-harness with its own worktree primitive activates on exactly that
-instruction, and would isolate a second time on top of the slot UZE already
-placed the agent in.
+The instructions a launched agent is given state where it already is (its
+checkout and branch, or the operator's own checkout) and how to give a
+subagent a checkout; they never ask for a top-level worktree. A harness with
+its own worktree primitive activates on exactly that instruction, and would
+isolate a second time on top of the slot UZE already placed the agent in.
 
-> `tests/projection/worktree_policy.rs::the_projection_never_triggers_a_harnesss_own_isolation`
-> `crates/uze-workspace/src/worktree.rs::the_projected_text_never_asks_for_a_top_level_worktree`
+> `crates/uze-workspace/src/worktree.rs::the_instructions_never_ask_for_a_top_level_worktree`
+> `crates/uze-workspace/src/worktree.rs::an_isolated_agent_is_told_its_checkout_branch_and_target`
 
-### A declaration stays editable
+### The policy an agent reads is the one in force at its launch
 
-The region's identity carries the rendered content's digest, so changing the
-`workspace:` section of `agents.yaml` reads as one region going stale and another appearing — never as drift
-inside the region that already exists. Exactly one policy region exists at a
-time, and a hand edit still drifts and is refused.
+The instructions are rendered on every launch and resume from the
+declaration in force and the branch the checkout has then, so an edit to
+`agents.yaml` reaches the next launch with nothing written anywhere, and a
+resume after naming states the new branch.
 
-> `tests/projection/worktree_policy.rs::editing_the_declaration_replaces_its_region_rather_than_drifting`
-> `tests/projection/worktree_policy.rs::an_edited_region_is_blocked_not_overwritten`
+> `crates/uze-workspace/src/continuity.rs::the_policy_in_force_is_the_one_the_manifest_declares`
+> `crates/uze-workspace/src/continuity.rs::the_instructions_name_the_branch_the_checkout_has_now`
 
 ### A change view shows one checkout, never the repository
 
@@ -2255,7 +2359,7 @@ a harness an agent starts — is composed nothing and given nothing.
 
 > `crates/uze-workspace/src/continuity.rs::a_channel_gives_the_briefing_on_every_launch_and_never_in_argv`
 > `crates/uze-workspace/src/continuity.rs::an_operators_own_invocation_is_given_no_context`
-> `crates/uze-workspace/src/continuity.rs::nothing_to_give_delivers_nothing`
+> `crates/uze-workspace/src/continuity.rs::every_launch_is_given_its_instructions`
 > `crates/uze-integrations/src/opencode/agent_context.rs::the_document_is_written_under_the_assigned_conversation`
 
 ### Memory never enters a checkout, and an agent's machine fact waits for the operator
@@ -2575,18 +2679,36 @@ package manager's keys as they were.
 > `crates/uze-workspace/src/declaration.rs::tests::a_scaffolded_manifest_declares_no_policy`
 > `crates/uze-workspace/src/declaration.rs::tests::choosing_a_delivery_adds_the_section_and_leaves_the_rest_alone`
 
-### Each region of `AGENTS.md` has one owner
+### No UZE operation changes `AGENTS.md` except to remove a retired region
 
-The package manager writes its regions (plugin contributions, plugin
-authoring) and counts only those as drift; it never writes, removes or
-counts the workspace's region. The workspace keeps its own in step in the
-primary checkout only, never in a slot, and an isolate does not carry a
-region-only change. Both owners take one per-project guard on the file.
+Nothing UZE runs creates, changes or appends to the operator's
+`AGENTS.md`: not a launch, not the workspace client, not `uze install`.
+The one writer is the cleanup that takes out the regions earlier releases
+wrote, in a main working tree only. A workspace policy or authoring region
+goes only while it holds the bytes its identity's digest names, and one
+edited by hand is reported and left; a package's instructions region goes
+by its shape alone. With the last package region, the `@AGENTS.md` bridge
+in `CLAUDE.md` goes too, and a `CLAUDE.md` that held nothing else is
+deleted. A linked worktree is never cleaned, and an isolate does not carry
+a removal-only change into the agent's branch. One per-project guard
+serializes writers of the file, and the architecture suite fails over any
+other production file that writes it.
 
-> `tests/projection/worktree_policy.rs::package_reconciliation_neither_writes_nor_removes_the_workspace_region`
-> `tests/projection/worktree_policy.rs::a_stale_workspace_region_leaves_the_package_environment_clear`
-> `crates/uze-application/src/application/services/tasks/tests.rs::task_service_tests::a_launch_in_the_primary_syncs_the_region_and_a_slot_is_never_written`
-> `crates/uze-application/src/application/services/tasks/tests.rs::task_service_tests::isolating_leaves_the_synced_region_behind_and_carries_the_rest`
+> `tests/architecture/layering.rs::a_retired_region_cleanup_is_the_only_writer_of_agents_md`
+> `crates/uze-application/src/application/retired_regions.rs::tests::a_package_region_goes_by_its_shape_whatever_it_holds`
+> `crates/uze-application/src/application/retired_regions.rs::tests::a_bridge_only_claude_md_goes_with_the_last_package_region`
+> `crates/uze-application/src/application/retired_regions.rs::tests::the_operators_lines_in_claude_md_stay_when_the_bridge_goes`
+> `tests/memory/reconciliation.rs::a_package_region_and_a_bridge_only_claude_md_go_together`
+> `tests/memory/reconciliation.rs::a_linked_worktree_is_left_as_its_branch_has_it`
+> `crates/uze-application/tests/slot_lifecycle.rs::install_in_a_slot_leaves_a_retired_region_as_committed`
+
+> `tests/projection/retired_regions.rs::reconciling_removes_what_an_earlier_release_wrote_and_nothing_else`
+> `tests/projection/retired_regions.rs::a_region_edited_by_hand_is_the_operators_now`
+> `tests/projection/retired_regions.rs::reconciling_a_project_writes_no_uze_text_into_agents_md`
+> `tests/projection/retired_regions.rs::the_workspace_client_only_reads_what_is_left`
+> `crates/uze-application/src/application/retired_regions.rs::tests::a_linked_worktree_is_never_cleaned`
+> `crates/uze-application/src/application/services/tasks/tests.rs::task_service_tests::a_launch_writes_nothing_into_agents_md_anywhere`
+> `crates/uze-application/src/application/services/tasks/tests.rs::task_service_tests::isolating_leaves_a_retired_regions_removal_behind_and_carries_the_rest`
 > `crates/uze-core/src/project/project_context.rs::tests::a_second_owner_waits_for_the_first`
 
 ### No shell file is edited, and the shim is the workspace's
@@ -2925,7 +3047,7 @@ and set aside for a reason rather than forgotten.
 
 ### The name is asked for as the first command about clear work
 
-The projected region's first bullet is the naming clause. Once a user message
+The launch instructions' first bullet is the naming clause. Once a user message
 makes the work's topic clear, it asks for the name as the agent's first
 command, before it reads a file, plans or edits. The moment carries the rule:
 a name states an intention, which is what an agent holds at its first topical
@@ -2935,7 +3057,7 @@ There is no mechanism behind this, which is exactly why the wording and the
 position are pinned by a test rather than left to whoever edits the string
 next.
 
-> `crates/uze-workspace/src/worktree.rs::naming_happens_as_soon_as_a_topic_is_clear`
+> `crates/uze-workspace/src/worktree.rs::naming_is_the_first_thing_asked_for`
 
 ### Work that reaches a commit unnamed is named from that commit
 
@@ -2978,14 +3100,14 @@ where `commits_ahead` answers `0` and a task with work reads as having none.
 ### Drift along the environment chain is reported, never applied on its own
 
 Declared (`agents.yaml`) → locked (`agents.lock`) → installed (the Store) →
-delivered (the projected region) is compared from the manifest down, and the
+delivered (what reaches each harness) is compared from the manifest down, and the
 comparison is two file reads and a set difference — no acquisition, no
 network. Converging a removal edits the lock and nothing on the machine:
 the Store keeps the package and every harness keeps reading it, because
 other projects share both and machine scope is `uze remove <plugin> -m`'s.
 
 > `tests/project/consumer.rs::drift::install_converges_the_lock_and_leaves_the_machine_alone`
-> `tests/project/consumer.rs::drift::a_package_region_gone_from_agents_md_reads_as_stale_until_install_clears_it`
+> `tests/project/consumer.rs::drift::a_region_an_earlier_release_left_reads_as_stale_until_install_removes_it`
 
 
 ## Input (M6)

@@ -54,6 +54,7 @@ fn support_fixture() -> crate::ui::agent_support::AgentSupport {
             instructions: ContextMechanism::RuntimeShim,
             project_skills: ContextMechanism::RuntimeShim,
             project_agents: ContextMechanism::RuntimeShim,
+            project_rules: ContextMechanism::RulesEngine,
         },
     };
     let context = AgentContextStatus {
@@ -64,6 +65,7 @@ fn support_fixture() -> crate::ui::agent_support::AgentSupport {
         instructions: ResourceDelivery::Projected,
         project_skills: ResourceDelivery::Projected,
         project_agents: ResourceDelivery::AbsentFromProject,
+        project_rules: ResourceDelivery::AbsentFromProject,
     };
     crate::ui::agent_support::AgentSupport::resolve(health, &context)
 }
@@ -859,17 +861,17 @@ fn project_space(
         instructions: uze_application::application::InstructionsFile {
             path: PathBuf::from("/repo/AGENTS.md"),
             exists: true,
-            managed_regions: 0,
         },
         portability: uze_application::application::Portability::Portable,
         harnesses: Vec::new(),
         packages_installed: 0,
-        packages_contributing_here: Vec::new(),
         project_lock: uze_application::application::ProjectLockStatus::Absent,
         drift: Default::default(),
         issues: Vec::new(),
         held_back: Vec::new(),
         memory: Default::default(),
+        rules: None,
+        plugin_rules: Default::default(),
     };
     uze_application::SpaceOverview::Project(Box::new(uze_application::ProjectSpace {
         status: uze_application::application::ProjectStatus {
@@ -2777,7 +2779,6 @@ fn the_plugins_are_a_compact_table_and_the_drawer_folds_as_it_narrows() {
             locked: true,
             installed: true,
             differs_from_lock: false,
-            contributing: true,
             commit: Some("3605f817abcdef0123".to_owned()),
             freshness: Some(Freshness {
                 state,
@@ -2841,6 +2842,7 @@ fn the_count_in_the_foot_lists_the_space_s_issues() {
                 context_unread: Some("the project is not trusted".to_owned()),
                 agent_context: None,
                 outdated: None,
+                rules: None,
             });
     }
     model.space_overview.as_mut().expect("open").answer = Some(Ok(answer));

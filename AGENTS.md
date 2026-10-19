@@ -9,12 +9,14 @@ uze is a Rust CLI: the package manager and workspace for coding agents
 (Claude Code, Codex, OpenCode, Antigravity CLI). You install a
 plugin once; uze stores its bytes centrally and delivers it through each
 harness's most native mechanism — a real plugin where one exists, native
-capabilities where it doesn't, a safe adapter only as a last resort. It also
-maintains one project context file, `AGENTS.md`, and projects it into each
-harness's own bridge/config format instead of maintaining four separately.
+capabilities where it doesn't, a safe adapter only as a last resort. It
+treats one project context file, `AGENTS.md`, as the baseline every harness
+reads, and writes nothing into it: what only means something inside UZE
+reaches an agent through its launch, and what a plugin tells every agent is
+an `always_on` rule.
 
 This repository is itself the official uze marketplace: `marketplace.json` +
-`plugins/**` at the root, with `plugins/uze` (the `uze:init`, `uze:worktree`,
+`plugins/**` at the root, with `plugins/uze` (the `uze:init`, `uze:rules`, `uze:worktree`,
 `uze:architect` and `uze:author` Skills) as the one official plugin today.
 
 ## Commands
@@ -669,9 +671,9 @@ properties):
   `uze install` converges the manifest in both directions — a plugin dropped
   from `agents.yaml` leaves `agents.lock`, while the Store and every harness
   keep it, because other projects share those and taking it off the machine
-  is `uze remove <plugin> -m` — and leaves the project context reconciled, so
-  declaring an environment and projecting it are one command rather than
-  two.
+  is `uze remove <plugin> -m` — and, in a main working tree, takes out the
+  regions an earlier release wrote into `AGENTS.md` (and the `CLAUDE.md`
+  bridge that went with them), the one change UZE ever makes to that file.
 - **The header says what is happening; a toast says what happened.** The
   workspace client's header carries one line, only ever about work in
   flight, with a spinner and no clock — it goes when the work ends, which
@@ -688,11 +690,12 @@ properties):
   and what it dropped was whichever arrived second.
 - **`uze agent …` is an audience, not a category**: its reader is an agent
   UZE launched, not a person, so it is hidden from `uze --help` and
-  documented in the region UZE projects into `AGENTS.md` — each audience
-  reads one surface. `agent context inspect|plan|reconcile` sits there for
+  documented in the instructions each agent is given at launch and in the
+  official plugin's Skills — each audience reads one surface, and UZE
+  writes none of it into a project's `AGENTS.md`. `agent context inspect|plan|reconcile` sits there for
   that reason and no other: the project scope is unchanged, but the
-  region-by-region detail it answers with is something only a writer of
-  `AGENTS.md` acts on. A person asks `uze status` whether the project is
+  region-by-region detail it answers with, the retired regions still in
+  `AGENTS.md`, is something only an agent cleaning a project up acts on. A person asks `uze status` whether the project is
   ready and `uze install` to make it so, so anything a person needs to
   know about the context belongs in `status`, never in a fourth verb of
   their own. `uze agent work name <type>/<subject>` is how work
@@ -743,32 +746,18 @@ properties):
   an unclassified command fails `cargo test` by name
   (`tests::every_cli_command_is_classified`). Classify any new command you
   add here.
-- **Project context bridging**: `AGENTS.md` is the portable baseline for
-  project instructions. `CLAUDE.md` is the one generated bridge
-  (`@AGENTS.md`) produced by `uze agent context reconcile` — don't hand-edit
-  their managed regions in a *project uze manages*; this repository's own
-  root `CLAUDE.md`/`AGENTS.md` are the exception, maintained directly since
-  this is uze's own source, not a uze-managed target project.
+- **`AGENTS.md` is the operator's**: it is the portable baseline every
+  harness reads natively, and no production code writes it except
+  `uze-application`'s `retired_regions.rs`, which takes out the regions
+  earlier releases wrote (`project:*` while their digest matches,
+  `package:*:instructions` by shape, the `CLAUDE.md` bridge with the last of
+  them), in a main working tree only. Enforced by
+  `tests/architecture/layering.rs::a_retired_region_cleanup_is_the_only_writer_of_agents_md`.
+  This repository's own root `AGENTS.md` is maintained directly, since this
+  is uze's own source.
 
 `IntegrationPort` (in `uze-core::integration`) is intentionally kept as one
 trait proven by conformance tests across all four harnesses, rather than
 split into per-capability traits (`PackageDelivery`, `SkillDelivery`, …) —
 that fragmentation has been considered and rejected absent a concrete
 implementation problem forcing it.
-<!-- uze:begin project:plugin-authoring/1c13c82595549e7f -->
-## Authoring plugins
-
-- Creating a plugin is agent work, driven with these deterministic verbs, none of which needs anything but `uze` on the machine: `uze agent market create <name> --at <dir> [--description <text>]` scaffolds a marketplace as a Git repository, registers and links it in one step (or skip to the next verb when a marketplace already exists — ask `uze market list` for the names); `uze agent plugin create <name> --market <market> [--hook] [--mcp] [--instructions]` scaffolds a plugin into it; `uze agent plugin check <path>` and `uze agent market check <path>` validate offline — run the check before any install, then `uze install -m <plugin>@<market>` and iterate on the files, which the linked marketplace already reads. The guided script for the whole loop is the `uze:author` skill.
-<!-- uze:end project:plugin-authoring/1c13c82595549e7f -->
-<!-- uze:begin project:worktree-policy/f03c15cfb7b29e8a -->
-## Concurrent work isolation
-
-This section is for an agent `uze workspace` launched. An agent started any other way can ignore it: nothing below applies to it, and the `uze agent work` commands it names refuse outside the workspace.
-
-- As soon as a user message gives the conversation a clear topic — normally the first message — make naming your work your first command, before reading a file, planning or editing: `uze agent work name <type>/<subject>`. Types this project accepts: `feat|fix|docs|refactor|perf|test|build|ci|chore|style|revert`. The subject is ideally one or two words, never more than three, naming the intention, not a description of the task — `fix/branch-naming`, not `fix/correct-the-problem-with-agent-branch-names`. The command always updates your label. In a checkout of your own it also renames your branch; in the operator's checkout only your label changes. Work that reaches a commit still unnamed is named by UZE from that commit's subject. Name it again with the same command whenever the work turns out to be something else — the last name given is the one that stands. Invoke the command directly; do not merely say you will name the work.
-- An agent UZE isolated works in a checkout of its own under `.worktrees/<id>`, on branch `agent/<id>`. If your working directory is inside `.worktrees/`, you are already isolated; do not switch branches.
-- If your working directory is not inside `.worktrees/`, you are in the operator's own checkout, on the branch they are on: commit there, as you go, and never switch, reset, stash or clean it — the operator's uncommitted work is theirs. Nothing below about delivery applies to you; the branch keeps the name it has. Naming your work still applies here, first: it names your label, never their branch.
-- Commit your work on your own branch, as you go. Never commit to, merge into, rebase, or reset the target branch: delivery is UZE's — UZE rebases your branch onto the target, runs the project's checks and pushes it; open a request only when the project's instruction asks you to, and otherwise commit on your branch and stop.
-- If UZE tells you a rebase is paused in your checkout, resolve the conflicts preserving the intent of your change, run `git rebase --continue`, run the project's checks, and end your turn.
-- Before spawning parallel subagents that write files, give each its own checkout: `uze agent work split <topic>` prints the path of one cut from your current commit — hand that path to the subagent. When it is done, commit in both checkouts and run `uze agent work join <topic>` to bring its commits onto your branch; on a conflict, resolve it in the subagent's checkout, run `git rebase --continue` there, and join again. `uze agent work list` shows them. Never make a worktree with Git for this: UZE only knows the checkouts it made. An agent in the operator's checkout has no branch of its own to join into, and runs its subagents one after another instead.
-<!-- uze:end project:worktree-policy/f03c15cfb7b29e8a -->

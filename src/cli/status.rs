@@ -652,7 +652,7 @@ pub(crate) fn render_status(status: &ProjectStatus) -> String {
         instructions[1] = format!(
             "{} {}",
             progress::warning_icon(),
-            progress::label("behind what uze keeps there")
+            progress::label("carries sections an earlier uze wrote; `uze install` removes them")
         );
     }
     let mut rows = vec![instructions];
@@ -700,6 +700,19 @@ pub(crate) fn render_status(status: &ProjectStatus) -> String {
     {
         text.push('\n');
         text.push_str(&render_status_memory(report, label));
+    }
+    if let Some(rules) = report
+        .rules
+        .as_ref()
+        .filter(|rules| rules.present || !report.plugin_rules.plugins.is_empty())
+    {
+        text.push('\n');
+        text.push_str(&render_status_rules(
+            rules,
+            &report.plugin_rules,
+            &report.harnesses,
+            label,
+        ));
     }
     for harness in &report.harnesses {
         if let Some(reason) = &harness.agent_context {
@@ -780,6 +793,20 @@ fn status_label_width(report: &StatusReport, context: &[Vec<String>]) -> usize {
         .filter_map(|row| row.first())
         .map(|cell| progress::width(cell))
         .chain([plugins, drift, progress::width("machine")])
+        .chain(
+            report
+                .rules
+                .as_ref()
+                .filter(|rules| rules.present)
+                .map(|rules| progress::width(rules.directory)),
+        )
+        .chain(
+            report
+                .plugin_rules
+                .plugins
+                .iter()
+                .map(|plugin| progress::width(&plugin.plugin)),
+        )
         .max()
         .unwrap_or_default()
 }
@@ -812,6 +839,31 @@ pub(crate) fn status_headline(status: &ProjectStatus) -> String {
     }
     if status.commands_awaiting_approval.is_some() {
         return attention("commands await your approval".to_owned());
+    }
+    if let Some(rules) = report.rules.as_ref().filter(|rules| !rules.is_clean()) {
+        if rules.not_rules.is_empty() {
+            return attention(format!(
+                "{} does not parse",
+                uze_application::application::RULES_MANIFEST_FILE
+            ));
+        }
+        return attention(format!(
+            "{} in {} not delivered",
+            count(rules.not_rules.len(), "file"),
+            rules.directory
+        ));
+    }
+    let differing: usize = report
+        .plugin_rules
+        .plugins
+        .iter()
+        .map(|plugin| plugin.files.len())
+        .sum();
+    if differing > 0 {
+        return attention(format!(
+            "{} out of step with the lock",
+            count(differing, "plugin rule file")
+        ));
     }
     match &report.portability {
         Portability::Portable => format!(
@@ -860,24 +912,14 @@ pub(crate) fn render_status_instructions(
         || instructions.path.display().to_string(),
         |name| name.to_string_lossy().into_owned(),
     );
-    let state = if !instructions.exists {
-        format!("{} {}", progress::warning_icon(), progress::label("absent"))
-    } else if instructions.managed_regions == 0 {
+    let state = if instructions.exists {
         format!(
             "{} {}",
             progress::success_icon(),
             progress::label("present")
         )
     } else {
-        format!(
-            "{} {}",
-            progress::success_icon(),
-            progress::label(format!(
-                "{} {} managed by UZE",
-                instructions.managed_regions,
-                plural(instructions.managed_regions, "region", "regions")
-            ))
-        )
+        format!("{} {}", progress::warning_icon(), progress::label("absent"))
     };
     vec![name, state]
 }
@@ -888,7 +930,6 @@ pub(crate) fn render_status_instructions(
 pub(crate) fn render_portability_gaps(portability: &Portability) -> String {
     let gaps: Vec<String> = match portability {
         Portability::Portable | Portability::NoContext => return String::new(),
-        Portability::PartiallyPortable { gaps } => gaps.clone(),
         Portability::VendorLocked { files } => files
             .iter()
             .map(|path| {
@@ -999,6 +1040,118 @@ pub(crate) fn render_status_memory(report: &StatusReport, label: usize) -> Strin
     text
 }
 
+/// The checkout's rules counted by trigger, and every file there that is
+/// not delivered with the reason. Never a rule's body: the person asked
+/// whether the project is ready, not for the instructions themselves.
+pub(crate) fn render_status_rules(
+    rules: &uze_application::application::RulesReport,
+    plugin_rules: &uze_application::application::PluginRulesReport,
+    harnesses: &[uze_application::application::StatusHarness],
+    label: usize,
+) -> String {
+    let by_trigger = rules.by_trigger();
+    let own = rules.own().count();
+    let summary = if own == 0 {
+        progress::label("none")
+    } else {
+        std::iter::once(count(own, "rule"))
+            .chain(
+                by_trigger
+                    .iter()
+                    .map(|counted| format!("{} {}", counted.rules, counted.trigger)),
+            )
+            .collect::<Vec<_>>()
+            .join(&progress::label(" · "))
+    };
+    let mut text = progress::report_section("Rules");
+    let mut rows = vec![vec![progress::label(rules.directory), summary]];
+    rows.extend(plugin_rules.plugins.iter().map(|plugin| {
+        let state = match (&plugin.unverified, plugin.files.is_empty()) {
+            (Some(_), _) => format!(
+                "{} {}",
+                progress::warning_icon(),
+                progress::label("unverified")
+            ),
+            (None, true) => format!(
+                "{} {}",
+                progress::success_icon(),
+                progress::label("current")
+            ),
+            (None, false) => format!(
+                "{} {}",
+                progress::warning_icon(),
+                progress::label(format!("{} not current", count(plugin.files.len(), "file")))
+            ),
+        };
+        let shipped = plugin
+            .rules
+            .map(|rules| format!("{} · ", count(rules, "rule")))
+            .unwrap_or_default();
+        vec![plugin.plugin.clone(), format!("{shipped}{state}")]
+    }));
+    rows.extend(harnesses.iter().filter_map(|harness| {
+        let route = harness.rules.as_ref()?;
+        let delivered = match route.route {
+            "native" => format!("{} {}", progress::success_icon(), progress::label("native")),
+            "engine" => format!(
+                "{} {}",
+                progress::success_icon(),
+                progress::label("through the rules engine")
+            ),
+            _ => format!(
+                "{} {}",
+                progress::warning_icon(),
+                progress::label(format!("not delivered: {}", route.reason))
+            ),
+        };
+        Some(vec![harness.display_name.clone(), delivered])
+    }));
+    text.push_str(&progress::aligned_rows_from(rows, label));
+    text.push('\n');
+    for file in &rules.not_rules {
+        text.push_str(&format!(
+            "{} {}: {}\n",
+            progress::warning_icon(),
+            file.path,
+            uze_application::inert(&file.reason)
+        ));
+    }
+    text.push_str(&super::agent::render_manifest_findings(rules));
+    for plugin in &plugin_rules.plugins {
+        if let Some(reason) = &plugin.unverified {
+            text.push_str(&format!(
+                "{} {}: rules not checked against the lock: {}\n",
+                progress::warning_icon(),
+                plugin.plugin,
+                uze_application::inert(reason)
+            ));
+        }
+        for file in &plugin.files {
+            let said = match file.state {
+                "drifted" => format!(
+                    "edited; differs from {} at the locked revision, and `uze install` leaves it",
+                    plugin.plugin
+                ),
+                "missing" => "missing; `uze install` restores it".to_owned(),
+                _ => format!("not a rule {} ships", plugin.plugin),
+            };
+            text.push_str(&format!(
+                "{} {}: {said}\n",
+                progress::warning_icon(),
+                file.path
+            ));
+        }
+    }
+    for namespace in &plugin_rules.undeclared {
+        text.push_str(&format!(
+            "{} {namespace}: rules of a plugin this project does not declare\n",
+            progress::warning_icon()
+        ));
+    }
+    text.push('\n');
+    text
+}
+
 pub(crate) fn render_status_harness(
     display_name: &str,
     delivery: &HarnessContextDelivery,
@@ -1008,16 +1161,7 @@ pub(crate) fn render_status_harness(
         HarnessContextDelivery::Native => ok("native"),
         HarnessContextDelivery::Projected => ok("inside the workspace"),
         HarnessContextDelivery::NotDetected => progress::label("not installed"),
-        HarnessContextDelivery::Bridge {
-            state: uze_application::AttachmentState::Matched,
-            ..
-        } => ok("bridged"),
-        HarnessContextDelivery::Bridge { needed: false, .. } => ok("reads AGENTS.md natively"),
-        HarnessContextDelivery::Bridge { .. } => format!(
-            "{} {}",
-            progress::warning_icon(),
-            progress::label("needs reconciling")
-        ),
+        HarnessContextDelivery::ReadsNatively => ok("reads AGENTS.md natively"),
     };
     vec![display_name.to_owned(), state]
 }
@@ -1155,45 +1299,26 @@ pub(crate) fn render_context_status(status: &ProjectContextStatus) -> String {
             HarnessContextDelivery::Native => progress::success_text("native"),
             HarnessContextDelivery::Projected => progress::success_text("inside the workspace"),
             HarnessContextDelivery::NotDetected => progress::label("not installed"),
-            HarnessContextDelivery::Bridge { needed: false, .. } => format!(
+            HarnessContextDelivery::ReadsNatively => format!(
                 "{}  {}",
                 progress::success_text("native"),
                 progress::label("no bridge needed")
             ),
-            HarnessContextDelivery::Bridge { state, .. } => {
-                let word = attachment_word(*state);
-                if matches!(state, uze_application::AttachmentState::Matched) {
-                    progress::success_text(format!("bridge {word}"))
-                } else {
-                    progress::warning_text(format!("bridge {word}"))
-                }
-            }
         };
         rows.push(vec![harness.display_name.clone(), delivery]);
     }
     text.push_str(&progress::aligned_rows(rows));
     text.push('\n');
     let mut notes = String::new();
-    for contribution in &status.contributions {
-        notes.push_str(&format!(
-            "  {}   {}\n",
-            contribution.package_id,
-            progress::label(format!("{:?}", contribution.state).to_lowercase())
-        ));
-    }
-    for orphan in &status.orphaned_regions {
-        notes.push_str(&format!(
-            "{} {orphan}   {}\n",
-            progress::warning_icon(),
-            progress::label("orphaned: no installed package claims it")
-        ));
-    }
-    for malformed in &status.malformed_regions {
-        notes.push_str(&format!(
-            "{} {malformed}   {}\n",
-            progress::error_icon(),
-            progress::label("malformed: its markers cannot be trusted")
-        ));
+    if let Some(regions) = &status.retired_regions {
+        for row in retired_plan_rows(regions) {
+            notes.push_str(&format!(
+                "{} {}   {}\n",
+                progress::warning_icon(),
+                row[1],
+                row[2]
+            ));
+        }
     }
     for warning in &status.warnings {
         notes.push_str(&format!("{} {warning}\n", progress::warning_icon()));
@@ -1205,25 +1330,10 @@ pub(crate) fn render_context_status(status: &ProjectContextStatus) -> String {
     text
 }
 
-/// A receipt's state as the word a person reads.
-pub(crate) fn attachment_word(state: uze_application::AttachmentState) -> &'static str {
-    use uze_application::AttachmentState;
-    match state {
-        AttachmentState::Matched => "in place",
-        AttachmentState::Missing => "missing",
-        AttachmentState::Drifted => "drifted",
-        AttachmentState::Conflict => "in conflict",
-        AttachmentState::Blocked => "blocked",
-    }
-}
-
 pub(crate) fn render_portability(portability: &Portability) -> String {
     match portability {
         Portability::NoContext => "no instructions file yet".to_owned(),
         Portability::Portable => "portable".to_owned(),
-        Portability::PartiallyPortable { gaps } => {
-            format!("partially portable: {}", gaps.join("; "))
-        }
         Portability::VendorLocked { files } => format!(
             "locked to one vendor: {}",
             files
@@ -1235,60 +1345,55 @@ pub(crate) fn render_portability(portability: &Portability) -> String {
     }
 }
 
-pub(crate) fn render_action(action: &PlannedAction) -> String {
-    match action {
-        PlannedAction::Attach => progress::accent("write"),
-        PlannedAction::NoChange => progress::label("unchanged"),
-        PlannedAction::Remove => progress::warning_text("remove"),
-        PlannedAction::Blocked(reason) => progress::error_text(format!("blocked: {reason}")),
-    }
+fn file_name_of(path: &std::path::Path) -> String {
+    path.file_name().map_or_else(
+        || progress::path(path),
+        |name| name.to_string_lossy().into_owned(),
+    )
 }
 
-/// Bridge rows show the human label (`app.integration_label`); the plan's
-/// own keys stay the stable ids — which is what `--format json` emits.
-pub(crate) fn render_context_plan(plan: &ContextPlan, app: &UzeApplication) -> String {
+/// One row per region an earlier release wrote: the file, the region,
+/// and what the cleanup will do with it.
+fn retired_plan_rows(regions: &RetiredRegionsPlan) -> Vec<Vec<String>> {
+    let file = file_name_of(&regions.file);
     let mut rows = Vec::new();
-    for contribution in &plan.agents_md_plan.contributions {
+    for identity in &regions.remove {
         rows.push(vec![
-            "AGENTS.md".to_owned(),
-            contribution.package_id.as_str().to_owned(),
-            render_action(&contribution.action),
+            file.clone(),
+            identity.clone(),
+            progress::warning_text("remove, written by an earlier release"),
         ]);
     }
-    for orphan in &plan.agents_md_plan.orphans {
+    for (identity, reason) in &regions.keep {
         rows.push(vec![
-            "AGENTS.md".to_owned(),
-            orphan.region_identity.clone(),
-            render_action(&orphan.action),
+            file.clone(),
+            identity.clone(),
+            progress::warning_text(format!("keep: {reason}")),
         ]);
     }
-    for bridge in &plan.bridges {
+    for bridge in &regions.bridges {
+        let fate = match &bridge.fate {
+            BridgeFate::Region => progress::warning_text("remove, written by an earlier release"),
+            BridgeFate::File => {
+                progress::warning_text("delete the file, which holds nothing but this bridge")
+            }
+            BridgeFate::Kept(reason) => progress::warning_text(format!("keep: {reason}")),
+        };
         rows.push(vec![
-            bridge.file.file_name().map_or_else(
-                || progress::path(&bridge.file),
-                |name| name.to_string_lossy().into_owned(),
-            ),
-            app.health().integration_label(&bridge.integration),
-            render_action(&bridge.action),
+            file_name_of(&bridge.file),
+            "@AGENTS.md bridge".to_owned(),
+            fate,
         ]);
     }
-    if let Some(region) = &plan.authoring_region {
-        rows.push(vec![
-            region.file.file_name().map_or_else(
-                || progress::path(&region.file),
-                |name| name.to_string_lossy().into_owned(),
-            ),
-            "plugin authoring".to_owned(),
-            render_action(&region.action),
-        ]);
-        for identity in &region.superseded {
-            rows.push(vec![
-                String::new(),
-                identity.clone(),
-                progress::warning_text("remove, superseded"),
-            ]);
-        }
-    }
+    rows
+}
+
+pub(crate) fn render_context_plan(plan: &ContextPlan) -> String {
+    let rows = plan
+        .retired_regions
+        .as_ref()
+        .map(retired_plan_rows)
+        .unwrap_or_default();
     let checked = rows.len();
     if !plan.has_changes() {
         return format!(
@@ -1307,72 +1412,36 @@ pub(crate) fn render_context_plan(plan: &ContextPlan, app: &UzeApplication) -> S
     )
 }
 
-pub(crate) fn render_context_reconciliation(
-    report: &ContextReconciliationReport,
-    app: &UzeApplication,
-) -> String {
+pub(crate) fn render_context_reconciliation(report: &ContextReconciliationReport) -> String {
     let mut rows = Vec::new();
-    for package in &report.packages {
-        rows.push(vec![
-            "AGENTS.md".to_owned(),
-            package.package_id.to_string(),
-            progress::label(format!("{:?}", package.state).to_lowercase()),
-        ]);
-    }
-    for orphan in &report.removed_orphans {
-        rows.push(vec![
-            "AGENTS.md".to_owned(),
-            orphan.clone(),
-            progress::label("removed, orphaned"),
-        ]);
-    }
-    for (orphan, reason) in &report.blocked_orphans {
-        rows.push(vec![
-            "AGENTS.md".to_owned(),
-            orphan.clone(),
-            progress::error_text(format!("blocked: {reason}")),
-        ]);
-    }
-    for (package, reason) in &report.failed {
-        rows.push(vec![
-            "AGENTS.md".to_owned(),
-            package.to_string(),
-            progress::error_text(format!("failed: {reason}")),
-        ]);
-    }
-    if let Some(region) = &report.authoring_region {
-        rows.push(vec![
-            region.file.file_name().map_or_else(
-                || progress::path(&region.file),
-                |name| name.to_string_lossy().into_owned(),
-            ),
-            "plugin authoring".to_owned(),
-            progress::label(format!("{:?}", region.state).to_lowercase()),
-        ]);
-        for identity in &region.removed_superseded {
+    if let Some(regions) = &report.retired_regions {
+        let file = file_name_of(&regions.file);
+        for identity in &regions.removed {
             rows.push(vec![
-                String::new(),
+                file.clone(),
                 identity.clone(),
-                progress::label("removed, superseded"),
+                progress::label("removed, written by an earlier release"),
             ]);
         }
-        for (identity, reason) in &region.blocked_superseded {
+        for (identity, reason) in &regions.kept {
             rows.push(vec![
-                String::new(),
+                file.clone(),
                 identity.clone(),
-                progress::error_text(format!("blocked: {reason}")),
+                progress::warning_text(format!("kept: {reason}")),
             ]);
         }
-    }
-    for bridge in &report.bridges {
-        rows.push(vec![
-            bridge.file.file_name().map_or_else(
-                || progress::path(&bridge.file),
-                |name| name.to_string_lossy().into_owned(),
-            ),
-            app.health().integration_label(&bridge.integration),
-            progress::label(format!("{:?}", bridge.state).to_lowercase()),
-        ]);
+        for bridge in &regions.bridges {
+            let fate = match &bridge.fate {
+                BridgeFate::Region => progress::label("removed, written by an earlier release"),
+                BridgeFate::File => progress::label("deleted, it held nothing but this bridge"),
+                BridgeFate::Kept(reason) => progress::warning_text(format!("kept: {reason}")),
+            };
+            rows.push(vec![
+                file_name_of(&bridge.file),
+                "@AGENTS.md bridge".to_owned(),
+                fate,
+            ]);
+        }
     }
     let lines = if rows.is_empty() {
         String::new()

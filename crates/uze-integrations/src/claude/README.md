@@ -23,6 +23,7 @@ runtime contribution carries project agents only.
 | Agents | Supported | Inside the package plugin (Claude names them `<plugin>:<subdirs>:<name>`); outside one, a generated `~/.claude/agents/<label>.md` with `name: <label>`. Plugin agents lose `permissionMode`, `hooks`, `mcpServers`, `initialPrompt` either way (Claude ignores them inside the plugin, and UZE leaves them out of the loose file, where Claude would honour them), reported as Degraded | EMPIRICAL (`conformance/experiments/claude/parity.py`, Claude Code 2.1.283) |
 | Hooks | SUPPORTED | Native — one merged entry per canonical group in `~/.claude/settings.json`, whose `command`+`args` start the generated `hooks/exec` wrapper (ADR-033, ADR-040). Handlers read `HOOK_*` and answer with an exit code; ordering, first-deny-wins and fail-closed live in the wrapper because Claude runs a group's hooks in parallel and treats a non-blocking exit as "run the tool". The wrapper answers a denial in Claude's JSON dialect on exit 0 (`permissionDecision: deny` for `PreToolUse`, `decision: block` for `PostToolUse`/`Stop`); Claude 2.1.290 still shows every `PreToolUse` denial as "hook error", whatever the dialect, so the person sees the reason under that label. Subagent dispatch reaches hooks as `Agent`. No `uze` on the execution path. | EMPIRICAL — the Lab's hooks contract and census (2.1.290), `experiments/claude/deny-render` |
 | Skill invocation policy | SUPPORTED | Canonical `invoke: {model,user}` is translated into Claude's own SKILL.md frontmatter: `disable-model-invocation: true` (model=false) and `user-invocable: false` (user=false). Generated envelopes materialize those markers; an explicit envelope is only claimed as covered when the author's own bytes already carry them (never rewritten) — ADR-030 | EMPIRICAL — real `claude -p` run, `UZE_BYPASS=1` against the actual `materialize_generated_package` output, proved both explicit `/name` invocation and model-auto-invocation-blocked (marker technique carried over from ADR-030) |
+| Launch instructions (workspace agents) | SUPPORTED, subagents included | The workspace's instructions open the context the launch composes, in the generated `CLAUDE.md` of the agent's own `--add-dir` (the `Directory` channel). A subagent started with the `Agent` tool is given the same context: its own requests carry the instructions and the slot's `AGENTS.md` | EMPIRICAL (Claude Code 2.1.303, Lab contract `instructions`: `instructions-reach-the-model`, `instructions-working-directory-is-the-checkout`, `instructions-slot-never-given-the-primary-agents-md`, `instructions-reach-a-subagent`) |
 
 Claude is the only harness whose package coverage computation
 (`claude_exact_coverage`) actually intersects the manifest's declared
@@ -182,10 +183,10 @@ agents.
 This is independent of Native Projection (ADR-013): it delivers
 project-context, not package/capability content, and there is no higher-tier
 option to fall back from for an externally-scoped `AGENTS.md` — see ADR-014's
-"Relationship to Native Plugin Projection". A separate, older mechanism (the
-persistent `CLAUDE.md` bridge via `text_region`) also exists, owned by
-`crates/uze-application`, not this crate — which of the two is authoritative
-long-term is explicitly undecided (ADR-014 Consequences).
+"Relationship to Native Plugin Projection". The older persistent `CLAUDE.md`
+bridge is retired: Claude Code reads `AGENTS.md` itself, nothing writes the
+bridge, and `uze-application`'s retired-regions cleanup takes a leftover one
+out.
 
 ## Lifecycle
 
@@ -214,8 +215,6 @@ reasoning holds, not confirmed by a dedicated test.
 - MCP behavioral verification (an actual tool call) is not closed; a headless
   discovery quirk was characterized, not fixed (ADR-007).
 - `/compact` retention of runtime-projected context is unverified (ADR-014).
-- The persistent-bridge-vs-runtime-projection question for context delivery
-  is explicitly undecided.
 
 ## Evidence
 
@@ -234,4 +233,3 @@ reasoning holds, not confirmed by a dedicated test.
 1. Add unit coverage for the mutating native-plugin CLI functions (`attach_package`, `ClaudeMarketplace::install_plugin`) via a fake/injectable process boundary, matching how `provision_cli` already uses `ProcessRunner`. (An `executable_override` escape hatch was added and then removed this milestone for the generated-native pass — it ended up with zero call sites once PATH-based test isolation solved the actual failing tests more directly; worth reconsidering if this item is picked up for real.)
 2. Close the MCP headless-discovery/behavioral gap from ADR-007's last entry.
 3. Verify or refute the `package_root`-not-compared observation above with a dedicated drift test.
-4. Resolve persistent-bridge vs. runtime-projection precedence for Claude context delivery (ADR-014 Future Work).

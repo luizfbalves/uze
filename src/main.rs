@@ -17,14 +17,15 @@ use std::{
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use cli::*;
 use progress::count;
-use uze_application::{Chime, HostEntry, PlannedAction, Result, UzeHome, WorkspaceEntry};
+use uze_application::{Chime, HostEntry, Result, UzeHome, WorkspaceEntry};
 use uze_application::{
     UzeApplication,
     application::{
-        AddPluginReport, ContextPlan, ContextReconciliationReport, DoctorReport,
+        AddPluginReport, BridgeFate, ContextPlan, ContextReconciliationReport, DoctorReport,
         HarnessContextDelivery, HarnessHealth, MachineStatusReport, MarketplaceRemovalReport,
         MarketplaceSummary, PluginInspection, Portability, ProjectContextStatus, ProjectStatus,
-        ProvisionRoute, RemovePluginReport, RemoveProjectPluginReport, StatusReport,
+        ProvisionRoute, RemovePluginReport, RemoveProjectPluginReport, RetiredRegionsPlan,
+        StatusReport,
     },
 };
 // `Chime` arrives through the facade's own re-export (see uze-application).
@@ -562,15 +563,19 @@ fn dispatch(cli: Cli, home: UzeHome) -> Result<()> {
                 app.project().remove(&plugin, &current_dir)
             })?;
             match report {
-                RemoveProjectPluginReport::Removed { .. } => {
+                RemoveProjectPluginReport::Removed { rules, .. } => {
                     let message = progress::change_report(
                         "remove",
-                        &progress::change(progress::Change::Removed, &plugin, None),
+                        &format!(
+                            "{}{}",
+                            progress::change(progress::Change::Removed, &plugin, None),
+                            render_rule_copies(rules.as_slice())
+                        ),
                         "1 plugin removed from this project",
                     );
                     emit(
                         format,
-                        &RemoveProjectPluginReport::Removed { plugin },
+                        &RemoveProjectPluginReport::Removed { plugin, rules },
                         |_| message,
                     );
                 }
@@ -875,12 +880,13 @@ mod status_output_tests {
             portability,
             harnesses: Vec::new(),
             packages_installed: 0,
-            packages_contributing_here: Vec::new(),
             project_lock: ProjectLockStatus::Absent,
             drift: EnvironmentDrift::default(),
             issues: Vec::new(),
             held_back: Vec::new(),
             memory: Default::default(),
+            rules: None,
+            plugin_rules: Default::default(),
         };
         ProjectStatus {
             report,
@@ -893,7 +899,6 @@ mod status_output_tests {
         InstructionsFile {
             path: std::path::PathBuf::from("/project/AGENTS.md"),
             exists: true,
-            managed_regions: 2,
         }
     }
 
@@ -901,7 +906,6 @@ mod status_output_tests {
         InstructionsFile {
             path: std::path::PathBuf::from("/project/AGENTS.md"),
             exists: false,
-            managed_regions: 0,
         }
     }
 
@@ -909,27 +913,14 @@ mod status_output_tests {
     fn the_coverage_section_names_the_file_it_is_about() {
         let text = render_status(&report(present(), Portability::Portable));
         assert!(text.contains("AGENTS.md"), "{text}");
-        assert!(text.contains("2 regions managed by UZE"), "{text}");
+        assert!(text.contains("present"), "{text}");
+        assert!(!text.contains("managed by UZE"), "{text}");
     }
 
     #[test]
     fn an_absent_file_is_the_finding_rather_than_a_silent_gap() {
         let text = render_status(&report(absent(), Portability::NoContext));
         assert!(text.contains("absent"), "{text}");
-    }
-
-    /// The gaps used to be reachable only by running `context inspect`,
-    /// which is now the agent's command; a person reading "needs
-    /// attention" has to be told what about.
-    #[test]
-    fn a_bridge_gap_is_named_where_a_person_reads_it() {
-        let text = render_status(&report(
-            present(),
-            Portability::PartiallyPortable {
-                gaps: vec!["claude-code: bridge Missing".to_owned()],
-            },
-        ));
-        assert!(text.contains("claude-code: bridge Missing"), "{text}");
     }
 
     #[test]
@@ -946,15 +937,225 @@ mod status_output_tests {
     }
 
     #[test]
-    fn a_reconcilable_gap_is_owed_the_command_that_closes_it() {
-        let step = status_next_step(&report(
-            present(),
-            Portability::PartiallyPortable {
-                gaps: vec!["claude-code: bridge Missing".to_owned()],
-            },
-        ))
-        .expect("a bridge gap is owed a command");
+    fn a_region_an_earlier_release_wrote_is_owed_the_command_that_removes_it() {
+        let mut status = report(present(), Portability::Portable);
+        status.report.drift.stale_projection = true;
+        let step = status_next_step(&status).expect("a retired region is owed a command");
         assert_eq!(step, "uze install");
+    }
+
+    fn with_rules(
+        rules: Vec<uze_application::application::RuleSummary>,
+        not_rules: Vec<uze_application::application::NotARuleSummary>,
+        directory_present: bool,
+    ) -> ProjectStatus {
+        let mut status = report(present(), Portability::Portable);
+        status.report.rules = Some(uze_application::application::RulesReport {
+            root: std::path::PathBuf::from("/project"),
+            directory: ".agents/rules",
+            present: directory_present,
+            rules,
+            not_rules,
+            manifest: None,
+        });
+        status
+    }
+
+    fn with_manifest(unreadable: Option<&str>, inherits: bool) -> ProjectStatus {
+        let mut status = with_rules(
+            vec![summary(".agents/rules/a.md", "always_on")],
+            Vec::new(),
+            true,
+        );
+        status.report.rules.as_mut().unwrap().manifest =
+            Some(uze_application::application::ManifestSummary {
+                path: ".agents/rules.json",
+                unreadable: unreadable.map(str::to_owned),
+                inherits,
+            });
+        status
+    }
+
+    #[test]
+    fn a_manifest_that_does_not_parse_is_reported_and_needs_attention() {
+        let status = with_manifest(Some("it is not JSON: EOF while parsing"), false);
+        let text = crate::progress::unpainted(&render_status(&status));
+        assert!(
+            text.contains(".agents/rules.json: registers nothing, it is not JSON"),
+            "{text}"
+        );
+        assert!(text.contains(".agents/rules.json does not parse"), "{text}");
+    }
+
+    #[test]
+    fn a_manifest_that_inherits_is_reported_and_still_ready() {
+        let status = with_manifest(None, true);
+        let text = crate::progress::unpainted(&render_status(&status));
+        assert!(
+            text.contains(".agents/rules.json: `inherits` is not followed"),
+            "{text}"
+        );
+        assert!(text.contains("ready"), "{text}");
+    }
+
+    fn summary(path: &str, trigger: &'static str) -> uze_application::application::RuleSummary {
+        uze_application::application::RuleSummary {
+            path: path.to_owned(),
+            trigger,
+            patterns: Vec::new(),
+            description: None,
+            plugin: None,
+        }
+    }
+
+    #[test]
+    fn rules_are_counted_by_trigger() {
+        let status = with_rules(
+            vec![
+                summary(".agents/rules/a.md", "glob"),
+                summary(".agents/rules/b.md", "glob"),
+                summary(".agents/rules/c.md", "always_on"),
+            ],
+            Vec::new(),
+            true,
+        );
+        let text = crate::progress::unpainted(&render_status(&status));
+        assert!(text.contains("Rules"), "{text}");
+        assert!(
+            text.contains(".agents/rules   3 rules · 1 always_on · 2 glob"),
+            "{text}"
+        );
+        assert!(
+            text.contains("ready"),
+            "a clean set leaves the project ready: {text}"
+        );
+    }
+
+    #[test]
+    fn a_plugins_rules_are_counted_apart_from_the_projects_own() {
+        let copy = |rule: &str, trigger| uze_application::application::RuleSummary {
+            plugin: Some("acme-conventions@acme".to_owned()),
+            ..summary(
+                &format!(".agents/rules/acme-conventions@acme/{rule}"),
+                trigger,
+            )
+        };
+        let mut status = with_rules(
+            vec![
+                summary(".agents/rules/a.md", "glob"),
+                summary(".agents/rules/b.md", "always_on"),
+                copy("one.md", "glob"),
+                copy("two.md", "glob"),
+                copy("three.md", "always_on"),
+            ],
+            Vec::new(),
+            true,
+        );
+        status.report.plugin_rules = uze_application::application::PluginRulesReport {
+            plugins: vec![uze_application::application::PluginRulesStatus {
+                plugin: "acme-conventions@acme".to_owned(),
+                rules: Some(3),
+                files: vec![uze_application::application::RuleCopyFinding {
+                    path: ".agents/rules/acme-conventions@acme/two.md".to_owned(),
+                    state: "drifted",
+                }],
+                unverified: None,
+            }],
+            undeclared: Vec::new(),
+        };
+        let text = crate::progress::unpainted(&render_status(&status));
+        assert!(
+            text.contains(".agents/rules           2 rules · 1 always_on · 1 glob"),
+            "{text}"
+        );
+        assert!(
+            text.contains("acme-conventions@acme   3 rules · ! 1 file not current"),
+            "{text}"
+        );
+        assert!(
+            text.contains(".agents/rules/acme-conventions@acme/two.md: edited"),
+            "the drifted file is named: {text}"
+        );
+        assert!(
+            text.contains("1 plugin rule file out of step with the lock"),
+            "the headline says the project needs attention: {text}"
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_rule_is_named_with_its_reason() {
+        let status = with_rules(
+            vec![summary(".agents/rules/ui.md", "glob")],
+            vec![uze_application::application::NotARuleSummary {
+                path: ".agents/rules/notes.md".to_owned(),
+                reason: "has no frontmatter, so no `trigger`".to_owned(),
+            }],
+            true,
+        );
+        let text = crate::progress::unpainted(&render_status(&status));
+        assert!(
+            text.contains(".agents/rules/notes.md: has no frontmatter, so no `trigger`"),
+            "{text}"
+        );
+        assert!(
+            text.contains("1 file in .agents/rules not delivered"),
+            "the headline says the project needs attention: {text}"
+        );
+    }
+
+    #[test]
+    fn each_installed_harness_says_how_the_rules_reach_it() {
+        let mut status = with_rules(
+            vec![summary(".agents/rules/ui.md", "glob")],
+            Vec::new(),
+            true,
+        );
+        let route = |route: &'static str, reason: &str| {
+            Some(uze_application::application::StatusRulesRoute {
+                route,
+                reason: reason.to_owned(),
+            })
+        };
+        status.report.harnesses = vec![
+            StatusHarness {
+                rules: route("native", "reads .agents/rules itself"),
+                ..harness("antigravity", "Antigravity")
+            },
+            StatusHarness {
+                rules: route("engine", "the rules engine"),
+                ..harness("claude", "Claude Code")
+            },
+            StatusHarness {
+                rules: route("unsupported", "the engine is `sh`"),
+                ..harness("codex", "Codex")
+            },
+            harness("opencode", "OpenCode"),
+        ];
+        let text = crate::progress::unpainted(&render_status(&status));
+        let rules = &text[text.find("Rules").expect("a rules section")..];
+        assert!(
+            rules.contains("Antigravity") && rules.contains("native"),
+            "{rules}"
+        );
+        assert!(rules.contains("through the rules engine"), "{rules}");
+        assert!(
+            rules.contains("not delivered: the engine is `sh`"),
+            "{rules}"
+        );
+        assert!(
+            !rules
+                .lines()
+                .take(6)
+                .any(|line| line.starts_with("OpenCode")),
+            "a harness that is not installed gets no route row: {rules}"
+        );
+    }
+
+    #[test]
+    fn a_checkout_without_rules_has_no_rules_section() {
+        let text =
+            crate::progress::unpainted(&render_status(&with_rules(Vec::new(), Vec::new(), false)));
+        assert!(!text.contains("Rules"), "{text}");
     }
 
     #[test]
@@ -991,6 +1192,7 @@ mod status_output_tests {
             context_unread: None,
             agent_context: None,
             outdated: None,
+            rules: None,
         }
     }
 

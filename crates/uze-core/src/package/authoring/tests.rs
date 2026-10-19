@@ -40,7 +40,7 @@ fn every_scaffold_passes_its_own_check() -> Result<()> {
             hook: flags & 1 != 0,
             mcp: flags & 2 != 0,
             agent: flags & 4 != 0,
-            instructions: flags & 8 != 0,
+            rules: flags & 8 != 0,
         };
         let root = scratch(&format!("authoring-scaffold-{flags}"));
         let market = scaffold_marketplace("tools", Some("Test tools"), &root.join("market"))?;
@@ -77,6 +77,15 @@ fn every_scaffold_passes_its_own_check() -> Result<()> {
             market_report.agent_plugins
         );
         assert!(market_report.delivers.iter().any(|d| d == "greet"));
+        assert_eq!(
+            plugin_report
+                .delivers
+                .iter()
+                .any(|identity| identity.ends_with(":rules/conventions.md")),
+            caps.rules,
+            "{caps:?}: {:?}",
+            plugin_report.delivers
+        );
 
         // The marketplace manifest the scaffold wrote parses by the same
         // rule an install-time catalogue read uses — and by now names the
@@ -581,6 +590,44 @@ fn check_reports_a_skill_a_harness_could_not_read() -> Result<()> {
 }
 
 #[test]
+fn check_reports_a_root_agents_md_as_not_delivered_and_names_the_rule() -> Result<()> {
+    let _git_identity = git_identity();
+    let root = scratch("authoring-check-agents-md");
+    let market = scaffold_marketplace("tools", None, &root.join("market"))?;
+    let plugin = scaffold_plugin(
+        &market,
+        "greet",
+        None,
+        None,
+        &ScaffoldCapabilities::default(),
+    )?;
+    fs::write(plugin.join("AGENTS.md"), "Say hello first.\n").unwrap();
+
+    let report = check_plugin(&plugin)?;
+    assert!(report.is_clean(), "{:?}", report.findings);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("AGENTS.md")
+                && warning.contains("not delivered")
+                && warning.contains("always_on")),
+        "{:?}",
+        report.warnings
+    );
+    assert!(
+        report
+            .delivers
+            .iter()
+            .all(|identity| !identity.contains("AGENTS.md")),
+        "{:?}",
+        report.delivers
+    );
+    fs::remove_dir_all(&root).expect("teardown");
+    Ok(())
+}
+
+#[test]
 fn check_reports_a_reference_outside_the_plugin() -> Result<()> {
     let _git_identity = git_identity();
     let root = scratch("authoring-check-escape");
@@ -901,4 +948,46 @@ fn check_names_an_exec_form_script_a_platform_cannot_start() {
         report.warnings
     );
     let _ = fs::remove_dir_all(plugin.parent().unwrap().parent().unwrap());
+}
+
+#[test]
+fn check_fails_on_a_rule_no_harness_would_deliver() -> Result<()> {
+    let _git_identity = git_identity();
+    let root = scratch("authoring-rule-check");
+    let market = scaffold_marketplace("tools", None, &root.join("market"))?;
+    let plugin = scaffold_plugin(
+        &market,
+        "greet",
+        None,
+        None,
+        &ScaffoldCapabilities {
+            rules: true,
+            ..ScaffoldCapabilities::default()
+        },
+    )?;
+    fs::write(plugin.join("rules/ui.md"), "---\ntrigger: glob\n---\nUI\n").unwrap();
+    fs::create_dir_all(plugin.join("rules/nested")).unwrap();
+
+    let report = check_plugin(&plugin)?;
+
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.contains("rules/ui.md")
+                && finding.contains("`glob` rule without `globs`")),
+        "the file and the missing field are named: {:?}",
+        report.findings
+    );
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("rules/nested")),
+        "{:?}",
+        report.warnings
+    );
+    assert!(!report.is_clean());
+    fs::remove_dir_all(&root).expect("teardown");
+    Ok(())
 }

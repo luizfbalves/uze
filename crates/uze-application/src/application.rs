@@ -13,7 +13,6 @@ use serde::Serialize;
 use uze_core::{
     PackageSource, Result, UzeError, UzeHome, UzeStore,
     capability::CapabilityKind,
-    context::{self as instruction_context},
     detection_cache::DetectionCache,
     exposure::{ExposureMechanism, ExposurePlan, PackageExposurePlan},
     integration::{
@@ -46,7 +45,6 @@ mod harness_floor;
 mod inspection_cache;
 mod lifecycle;
 mod maintenance;
-mod managed_region;
 mod marketplace;
 mod marketplace_catalogue;
 pub mod memory;
@@ -57,6 +55,9 @@ mod profile;
 mod project_environment;
 mod read_models;
 mod requirements;
+mod retired_regions;
+mod rules;
+mod rules_engine;
 mod runtime_shim;
 pub mod services;
 mod setup;
@@ -66,6 +67,8 @@ pub use agent_context::{AgentContextStatus, ResourceDelivery, UndeliveredReason}
 pub use profile::{HarnessPreview, ProfileApplyResult, ProfilePreview, ProfileSummary};
 pub use read_models::*;
 pub use requirements::{PackageRequirements, RequirementLine, RequirementStatus};
+pub use rules::{ManifestSummary, NotARuleSummary, RuleSummary, RulesReport, TriggerCount};
+pub use rules_engine::RulesSetup;
 pub use setup::ProvisionRoute;
 pub use theme::{GlyphSetSummary, ThemeSummary};
 
@@ -76,10 +79,13 @@ pub use overview::{
 };
 use project_environment::ProjectEnvironmentPlan;
 pub use project_environment::{
-    InstallReport, ProjectLockStatus, RemoveProjectPluginReport, UpdateOutcome, UpdateReport,
+    InstallReport, PluginRulesReport, PluginRulesStatus, ProjectLockStatus,
+    RemoveProjectPluginReport, RuleCopies, RuleCopyFinding, UpdateOutcome, UpdateReport,
     UpdateScope,
 };
 pub use uze_core::anchor::AnchorKind;
+pub use uze_core::rules::manifest::MANIFEST_FILE as RULES_MANIFEST_FILE;
+pub use uze_core::rules::plugin::ManifestChange as RulesManifestChange;
 
 pub struct UzeApplication {
     home: UzeHome,

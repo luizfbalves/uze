@@ -166,6 +166,11 @@ fn majority_newline(lines: &[Line]) -> Newline {
 /// Writes the lines back exactly as they stand: every line UZE did not
 /// touch keeps the bytes it arrived with, terminator included.
 fn write_lines(path: &Path, lines: &[Line]) -> Result<()> {
+    write_atomic_within(holding_directory(path), path, text_of(lines).as_bytes())
+}
+
+/// The lines as the bytes a file holds, each with its own terminator.
+fn text_of(lines: &[Line]) -> String {
     let mut out = String::new();
     for line in lines {
         out.push_str(&line.text);
@@ -173,7 +178,7 @@ fn write_lines(path: &Path, lines: &[Line]) -> Result<()> {
             out.push_str(ending.separator());
         }
     }
-    write_atomic_within(holding_directory(path), path, out.as_bytes())
+    out
 }
 
 /// The directory a region's file is contained by. A region lives in a file
@@ -784,6 +789,29 @@ fn inspect_lines(
     )
 }
 
+/// The bytes a well-formed region holds, as they were handed to [`attach`]
+/// (each line followed by a newline), or `None` when the region is absent,
+/// malformed or the file cannot be read. What a caller holding only a
+/// digest of the content it wrote compares against.
+pub fn region_body(target_file: &Path, region_identity: &str) -> Option<String> {
+    if !identity_is_valid(region_identity) {
+        return None;
+    }
+    let Ok(Some(lines)) = read_lines(target_file) else {
+        return None;
+    };
+    let (begin_marker, end_marker) = markers(region_identity);
+    let Scan::WellFormed { begin, end } = scan(&lines, &begin_marker, &end_marker) else {
+        return None;
+    };
+    let body = joined_text(&lines[begin + 1..end]);
+    Some(if body.is_empty() {
+        body
+    } else {
+        format!("{body}\n")
+    })
+}
+
 /// The `region_identity` named by every begin marker line in
 /// `target_file`, in file order — one entry per line, so an identity whose
 /// markers are duplicated or half present appears too, as often as its
@@ -810,12 +838,18 @@ fn identities_in(lines: &[Line]) -> Vec<String> {
         .collect()
 }
 
-/// Whether two versions of a file say the same thing outside the regions
-/// UZE manages in them: the same non-blank lines, in the same order, once
-/// every well-formed region is set aside. Blank lines are not compared,
-/// because attaching a region is what adds the one that separates it.
-pub fn same_outside_managed_regions(left: &str, right: &str) -> bool {
-    authored_lines(&lines_of(left)).eq(authored_lines(&lines_of(right)))
+/// `text` with every well-formed region `owns` claims taken out, line for
+/// line as [`remove_unconditionally`] takes one out of a file: what the file
+/// would read after that removal, answered of a version only Git holds.
+/// A region whose markers are malformed is left in, as it would be there.
+pub fn without_regions(text: &str, owns: impl Fn(&str) -> bool) -> String {
+    let mut lines = lines_of(text);
+    let mut identities = identities_in(&lines);
+    identities.dedup();
+    for identity in identities.iter().filter(|identity| owns(identity)) {
+        let _ = remove_lines(&mut lines, identity);
+    }
+    text_of(&lines)
 }
 
 fn authored_lines(lines: &[Line]) -> impl Iterator<Item = &str> {
@@ -852,6 +886,25 @@ pub fn has_content_outside_managed_regions(target_file: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_without_regions_reads_as_the_file_after_their_removal() {
+        let dir = uze_testkit::temp::scratch("without-regions");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("AGENTS.md");
+        fs::write(&file, "# Mine\r\n").unwrap();
+        attach(&file, "package:a:b:instructions", "A").unwrap();
+        attach(&file, "keep:me", "K").unwrap();
+        let before = fs::read_to_string(&file).unwrap();
+        remove_unconditionally(&file, "package:a:b:instructions").unwrap();
+
+        assert_eq!(
+            without_regions(&before, |identity| identity.starts_with("package:")),
+            fs::read_to_string(&file).unwrap()
+        );
+        assert_eq!(without_regions(&before, |_| false), before);
+        let _ = fs::remove_dir_all(dir);
+    }
 
     /// Whether `target_file` currently holds *any* UZE-managed region at
     /// all, regardless of identity. Exercised only by the tests below; a
@@ -1495,6 +1548,21 @@ mod tests {
             AttachmentState::Blocked
         );
         assert!(convergence.desired[0].write_failure.is_some());
+    }
+
+    #[test]
+    fn a_region_body_is_what_was_attached() {
+        let dir = uze_testkit::temp::scratch("text-region-body");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("AGENTS.md");
+        std::fs::write(&file, "# Mine\n").unwrap();
+        attach(&file, "owner/abc", "line one\nline two\n").unwrap();
+        assert_eq!(
+            region_body(&file, "owner/abc").as_deref(),
+            Some("line one\nline two\n")
+        );
+        assert_eq!(region_body(&file, "owner/other"), None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

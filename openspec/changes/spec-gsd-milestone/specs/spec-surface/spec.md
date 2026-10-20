@@ -29,10 +29,11 @@ has no unit of its own.
 
 ### Requirement: An open GSD milestone is a subject of its own
 When GSD is detected and `.planning/STATE.md` names a milestone whose
-status is not complete, shipped or archived, the surface SHALL offer a
+status is not complete, completed, shipped or archived, the surface SHALL offer a
 **milestone** subject before the others. It SHALL list an overview, then
 one row per roadmap phase with its plans done out of all, the current
-phase marked. The surface SHALL open on it when the agent has no unit of
+phase marked. A phase the roadmap gives a `### Phase` heading and no
+checklist line SHALL be listed with the others, in number order. The surface SHALL open on it when the agent has no unit of
 its own. A finished milestone SHALL NOT be offered.
 
 #### Scenario: An open milestone
@@ -41,8 +42,13 @@ its own. A finished milestone SHALL NOT be offered.
 - **THEN** the milestone subject SHALL be shown, on its overview
 
 #### Scenario: A finished milestone
-- **WHEN** the state's milestone status is complete
+- **WHEN** the state's milestone status is complete or completed
 - **THEN** the milestone subject SHALL NOT be offered
+
+#### Scenario: A phase added under Phase Details alone
+- **WHEN** the roadmap's checklist lists phases 3 and 4 and its Phase
+  Details also hold `### Phase 3.1` and `### Phase 5`
+- **THEN** the rows SHALL be phases 3, 3.1, 4 and 5, in that order
 
 ### Requirement: A phase is shown by its waves and its next step
 The overview SHALL render the milestone's progress, where it stopped, its

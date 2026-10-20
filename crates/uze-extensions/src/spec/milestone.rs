@@ -212,18 +212,25 @@ pub fn read(host: &dyn Host, root: &Path) -> Option<Milestone> {
     } else {
         current.map_or(Ask::of(Step::Next, None), |at| phases[at].next.clone())
     };
-    let number = |key: &str| {
-        field(&front, key)
-            .and_then(|value| value.parse::<u32>().ok())
+    let count = |key: &str| field(&front, key).and_then(|value| value.parse::<u32>().ok());
+    let number = |key: &str| count(key).unwrap_or(0);
+    let (plans_done, plans_total) = (
+        number("progress.completed_plans"),
+        number("progress.total_plans"),
+    );
+    // Newer GSD writes the plan counts and no percent; count it from them.
+    let percent = count("progress.percent").unwrap_or_else(|| {
+        (plans_done.min(plans_total) * 100)
+            .checked_div(plans_total)
             .unwrap_or(0)
-    };
+    });
     Some(Milestone {
         name: field(&front, "milestone_name")
             .unwrap_or_default()
             .to_owned(),
-        percent: u8::try_from(number("progress.percent").min(100)).unwrap_or(100),
-        plans_done: number("progress.completed_plans"),
-        plans_total: number("progress.total_plans"),
+        percent: u8::try_from(percent.min(100)).unwrap_or(100),
+        plans_done,
+        plans_total,
         stopped_at: field(&front, "stopped_at")
             .filter(|value| !value.is_empty() && *value != "null")
             .map(str::to_owned),
@@ -363,7 +370,7 @@ fn closed(status: &str) -> bool {
         .any(|word| {
             matches!(
                 word,
-                "complete" | "milestone_complete" | "shipped" | "archived"
+                "complete" | "completed" | "milestone_complete" | "shipped" | "archived"
             )
         })
 }
@@ -406,11 +413,12 @@ fn field<'a>(fields: &'a [(String, String)], key: &str) -> Option<&'a str> {
 }
 
 /// The phases a roadmap lists, as `(number, name, done)`: its checklist
-/// (`- [x] **Phase 2: Import**`), or failing that its `### Phase` headings.
+/// (`- [x] **Phase 2: Import**`), joined by the `### Phase` headings it has
+/// no line for — a phase added under Phase Details alone — in number order.
 /// A milestone already shipped is folded in `<details>` and is not read.
 fn roadmap_phases(roadmap: &str) -> Vec<(String, String, bool)> {
     let visible = without_details(roadmap);
-    let listed: Vec<_> = visible
+    let mut listed: Vec<_> = visible
         .lines()
         .filter_map(|line| {
             let rest = line.trim_start().strip_prefix("- [")?;
@@ -421,16 +429,32 @@ fn roadmap_phases(roadmap: &str) -> Vec<(String, String, bool)> {
             Some((number, name, matches!(tick, "x" | "X")))
         })
         .collect();
-    if !listed.is_empty() {
-        return listed;
-    }
-    visible
+    let headed: Vec<_> = visible
         .lines()
         .filter_map(|line| {
             let heading = line.strip_prefix("### Phase")?;
             let (number, name) = phase_heading(heading)?;
             Some((number, name.replace(['`', '*'], ""), false))
         })
+        .filter(|(number, _, _)| {
+            !listed
+                .iter()
+                .any(|(other, _, _)| same_number(other, number))
+        })
+        .collect();
+    if headed.is_empty() {
+        return listed;
+    }
+    listed.extend(headed);
+    listed.sort_by_key(|(number, _, _)| number_order(number));
+    listed
+}
+
+/// A phase number as its parts, for ordering: `2.10` after `2.9`.
+fn number_order(number: &str) -> Vec<u32> {
+    number
+        .split('.')
+        .map(|part| part.parse().unwrap_or(0))
         .collect()
 }
 
@@ -869,9 +893,86 @@ mod tests {
         write(
             dir.path(),
             ".planning/STATE.md",
+            "---\nmilestone: v1.3\nstatus: completed\n---\n",
+        );
+        assert!(
+            read(&DiskHost, dir.path()).is_none(),
+            "GSD writes `completed` once the milestone is done"
+        );
+        write(
+            dir.path(),
+            ".planning/STATE.md",
             "---\nstatus: executing\n---\n",
         );
         assert!(read(&DiskHost, dir.path()).is_none(), "no milestone named");
+    }
+
+    #[test]
+    fn a_phase_with_only_a_heading_is_read_with_the_listed_ones() {
+        let dir = project("gsd-heading-only");
+        let roadmap = ROADMAP.replace(
+            "### Phase 4: Sharing\n**Goal**: Links\n",
+            "### Phase 4: Sharing\n**Goal**: Links\n\n\
+             ### Phase 3.1: Hotfix\n**Goal**: Patch\n\n\
+             ### Phase 5: Public Links\n**Goal**: By PIN\n",
+        );
+        write(dir.path(), ".planning/ROADMAP.md", &roadmap);
+        write(
+            dir.path(),
+            ".planning/STATE.md",
+            &STATE.replace("Phase: 3 of 4 (Sync Engine)", "Phase: 5 (Public Links)"),
+        );
+        let milestone = read(&DiskHost, dir.path()).unwrap();
+        let phases: Vec<_> = milestone
+            .phases
+            .iter()
+            .map(|phase| (phase.number.as_str(), phase.name.as_str(), phase.done))
+            .collect();
+        assert_eq!(
+            phases,
+            [
+                ("2", "Import", true),
+                ("3", "Sync Engine", false),
+                ("3.1", "Hotfix", false),
+                ("4", "Sharing", false),
+                ("5", "Public Links", false),
+            ],
+            "a phase added under Phase Details without a checklist line"
+        );
+        assert_eq!(milestone.current, Some(4));
+        assert_eq!(milestone.phases[4].goal, "By PIN");
+        assert_eq!(milestone.next.words(), "gsd-discuss-phase 5");
+    }
+
+    #[test]
+    fn a_missing_percent_is_counted_from_the_plans() {
+        let dir = project("gsd-percent");
+        write(
+            dir.path(),
+            ".planning/STATE.md",
+            &STATE.replace("  percent: 50\n", "").replace(
+                "total_plans: 4\n  completed_plans: 2",
+                "total_plans: 65\n  completed_plans: 64",
+            ),
+        );
+        let milestone = read(&DiskHost, dir.path()).unwrap();
+        assert_eq!(
+            (
+                milestone.percent,
+                milestone.plans_done,
+                milestone.plans_total
+            ),
+            (98, 64, 65)
+        );
+        write(
+            dir.path(),
+            ".planning/STATE.md",
+            &STATE.replace("  percent: 50\n", "").replace(
+                "total_plans: 4\n  completed_plans: 2",
+                "total_plans: 0\n  completed_plans: 0",
+            ),
+        );
+        assert_eq!(read(&DiskHost, dir.path()).unwrap().percent, 0);
     }
 
     #[test]

@@ -33,8 +33,8 @@ speaking in roles.
 
 **A fourth subject, outside `Subject::ALL`.** The three subjects are what
 every tool may keep. The milestone is offered in front of them, only while
-one is open, and a finished milestone (`complete`, `milestone_complete`,
-`shipped`, `archived`) is not shown.
+one is open, and a finished milestone (`complete`, `completed`,
+`milestone_complete`, `shipped`, `archived`) is not shown.
 
 **The step is pasted, never sent.** `SpecOutcome::Prompt { skill,
 arguments }` asks the host to type into the focused agent through
@@ -54,8 +54,9 @@ phase done → audit the milestone.
 ## Risks / Trade-offs
 
 - GSD's file formats are not versioned. The reader takes what it finds and
-  falls back (roadmap checklist, then `### Phase` headings; `Phase:` in the
-  state body, then the first unfinished phase), and shows less rather than
-  failing.
+  falls back (roadmap checklist, joined by the `### Phase` headings it has
+  no line for; `Phase:` in the state body, then the first unfinished phase;
+  the percent counted from the plans when the state has none), and shows
+  less rather than failing.
 - A step pasted while the agent is mid-turn is queued by the harness the
   way typed text would be; the surface does not check.

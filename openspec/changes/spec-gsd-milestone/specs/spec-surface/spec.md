@@ -51,19 +51,26 @@ its own. A finished milestone SHALL NOT be offered.
 - **THEN** the rows SHALL be phases 3, 3.1, 4 and 5, in that order
 
 ### Requirement: A phase is shown by its waves and its next step
-The overview SHALL render the milestone's progress, where it stopped, its
-blockers and pending todos. A phase SHALL render its goal, its success
-criteria, and its plans grouped by wave: a plan with a summary done, the
+The overview SHALL render the milestone's progress, where it stopped, a
+table of its phases (number, name, plans done out of all, and whether each
+is done, current, in progress or not started), the current phase's plans,
+its blockers and pending todos, and end with the step GSD would run next.
+A phase SHALL open on where it stands and its next step, then render its
+goal, its success criteria, and its plans as a table, one row each with
+its wave, its first sentence and its mark: a plan with a summary done, the
 first open wave current, a plan that is not autonomous marked as stopping
-for the operator. Both SHALL end with the step GSD would run next, chosen
-from what the phase holds, and the milestone audit once every phase is
-done.
+for the operator. The step SHALL be chosen from what the phase holds, and
+be the milestone audit once every phase is done.
 
 #### Scenario: A phase half executed
 - **WHEN** a phase has two waves and only the first wave's plans have
   summaries
-- **THEN** the first wave SHALL be shown done, the second current, and the
-  next step SHALL be to execute that phase
+- **THEN** the first wave's rows SHALL be shown done, the second's current,
+  and the next step SHALL be to execute that phase
+
+#### Scenario: A plan described at length
+- **WHEN** a plan's objective or summary runs to a paragraph
+- **THEN** its row SHALL show the first sentence, cut to one line
 
 #### Scenario: Every phase done
 - **WHEN** every roadmap phase is checked off

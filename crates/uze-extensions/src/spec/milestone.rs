@@ -652,9 +652,32 @@ pub fn overview(milestone: &Milestone) -> String {
     if let Some(stopped_at) = &milestone.stopped_at {
         text.push_str(&format!("\nStopped at: {stopped_at}\n"));
     }
-    if let Some(phase) = milestone.current.map(|at| &milestone.phases[at]) {
+    if !milestone.phases.is_empty() {
+        text.push_str("\n## Phases\n\n| Phase | Name | Plans | State |\n|--:|---|:-:|---|\n");
+        for (at, phase) in milestone.phases.iter().enumerate() {
+            let current = milestone.current == Some(at);
+            // The current phase is the row the eye looks for first.
+            let strong = |text: &str| {
+                if current {
+                    format!("**{text}**")
+                } else {
+                    text.to_owned()
+                }
+            };
+            text.push_str(&format!(
+                "| {} | {} | {} | {} |\n",
+                strong(&phase.number),
+                strong(&cell(&phase.name)),
+                plans_done_of_all(phase),
+                strong(standing(phase, current)),
+            ));
+        }
+    }
+    if let Some(phase) = milestone.current.map(|at| &milestone.phases[at])
+        && !phase.plans.is_empty()
+    {
         text.push_str(&format!("\n## Phase {} · {}\n", phase.number, phase.name));
-        push_waves(&mut text, phase, false);
+        push_plans(&mut text, phase);
     }
     if !milestone.blockers.is_empty() {
         text.push_str("\n## Blockers\n\n");
@@ -674,9 +697,22 @@ pub fn overview(milestone: &Milestone) -> String {
     text
 }
 
-/// One phase in full, as a document the surface renders.
+/// One phase in full, as a document the surface renders: where it stands
+/// and what runs next first, then its goal, criteria and plans.
 pub fn detail(phase: &Phase) -> String {
     let mut text = format!("# Phase {} · {}\n", phase.number, phase.name);
+    let mut line = vec![format!("**{}**", standing(phase, false))];
+    if !phase.plans.is_empty() {
+        line.push(format!(
+            "{} of {} plans",
+            phase.finished_plans(),
+            phase.plans.len()
+        ));
+    }
+    if !phase.done {
+        line.push(format!("next `{}`", phase.next.words()));
+    }
+    text.push_str(&format!("\n{}\n", line.join(" · ")));
     if !phase.goal.is_empty() {
         text.push_str(&format!("\n**Goal:** {}\n", phase.goal));
     }
@@ -688,7 +724,7 @@ pub fn detail(phase: &Phase) -> String {
     }
     if !phase.plans.is_empty() {
         text.push_str("\n## Plans\n");
-        push_waves(&mut text, phase, true);
+        push_plans(&mut text, phase);
     }
     if !phase.documents.is_empty() {
         text.push_str("\n## Documents\n\n");
@@ -696,38 +732,92 @@ pub fn detail(phase: &Phase) -> String {
             text.push_str(&format!("- {document}\n"));
         }
     }
-    if !phase.done {
-        text.push_str(&format!("\n## Next\n\n`{}`\n", phase.next.words()));
-    }
     text
 }
 
-fn push_waves(text: &mut String, phase: &Phase, summaries: bool) {
+/// A phase's plans as one table, a row each: the wave named on its first
+/// plan only, a plan by the first sentence of what it delivered (or, not
+/// run yet, of what it sets out to do), and its mark.
+fn push_plans(text: &mut String, phase: &Phase) {
+    text.push_str("\n| Wave | Plan | Objective | Status |\n|:-:|:-:|---|---|\n");
     let mut wave = None;
     for plan in &phase.plans {
-        if wave != Some(plan.wave) {
+        let wave_cell = if wave == Some(plan.wave) {
+            String::new()
+        } else {
             wave = Some(plan.wave);
-            let current = phase
-                .plans
-                .iter()
-                .any(|other| other.wave == plan.wave && other.mark == Mark::Current);
-            let suffix = if current { " · current" } else { "" };
-            text.push_str(&format!("\n### Wave {}{suffix}\n\n", plan.wave));
+            plan.wave.to_string()
+        };
+        let said = if plan.mark == Mark::Done && !plan.summary.is_empty() {
+            &plan.summary
+        } else {
+            &plan.objective
+        };
+        let mut status = match plan.mark {
+            Mark::Done => "done",
+            Mark::Current => "**current**",
+            Mark::Pending => "pending",
         }
-        let tick = if plan.mark == Mark::Done { "x" } else { " " };
-        let mut line = format!("- [{tick}] **{}**", plan.name);
-        if !plan.objective.is_empty() {
-            line.push_str(&format!(" {}", plan.objective));
+        .to_owned();
+        if plan.checkpoint && plan.mark != Mark::Done {
+            status.push_str(" · *stops for you*");
         }
-        if plan.checkpoint {
-            line.push_str(" · *stops for you*");
-        }
-        text.push_str(&line);
-        text.push('\n');
-        if summaries && !plan.summary.is_empty() {
-            text.push_str(&format!("  {}\n", plan.summary));
-        }
+        text.push_str(&format!(
+            "| {wave_cell} | {} | {} | {status} |\n",
+            plan.id,
+            cell(&headline(said))
+        ));
     }
+}
+
+/// Where a phase stands, in a word or two.
+fn standing(phase: &Phase, current: bool) -> &'static str {
+    if phase.done {
+        "done"
+    } else if current {
+        "current"
+    } else if phase.plans.is_empty() {
+        "not started"
+    } else {
+        "in progress"
+    }
+}
+
+fn plans_done_of_all(phase: &Phase) -> String {
+    if phase.plans.is_empty() {
+        "—".to_owned()
+    } else {
+        format!("{}/{}", phase.finished_plans(), phase.plans.len())
+    }
+}
+
+/// A plan's text cut to its first sentence, and that to one table line:
+/// GSD's objectives and summaries run to a paragraph, and a table of them
+/// folds every row into several.
+fn headline(text: &str) -> String {
+    const WIDTH: usize = 60;
+    let sentence = text
+        .char_indices()
+        .find(|&(at, c)| {
+            matches!(c, '.' | ';' | ':')
+                && text[at + c.len_utf8()..]
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_whitespace)
+        })
+        .map_or(text, |(at, c)| &text[..at + c.len_utf8()])
+        .trim();
+    if sentence.chars().count() <= WIDTH {
+        return sentence.to_owned();
+    }
+    let cut: String = sentence.chars().take(WIDTH).collect();
+    let cut = cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head);
+    format!("{}…", cut.trim_end_matches([',', ';', ':', ' ']))
+}
+
+/// Text made safe for one Markdown table cell.
+fn cell(text: &str) -> String {
+    text.replace('|', "\\|").replace('\n', " ")
 }
 
 #[cfg(test)]
@@ -1002,17 +1092,64 @@ mod tests {
     }
 
     #[test]
-    fn the_documents_say_where_the_milestone_stands() {
+    fn the_overview_tabulates_the_phases_and_the_current_plans() {
         let dir = project("gsd-documents");
         let milestone = read(&DiskHost, dir.path()).unwrap();
         let overview = overview(&milestone);
         assert!(overview.starts_with("# v1.9 · Sync\n\n**executing** · 50% · 2 of 4 plans\n"));
-        assert!(overview.contains("### Wave 2 · current"));
-        assert!(overview.contains("- [ ] **03-03** From the plan. · *stops for you*"));
+        assert!(overview.contains(
+            "| Phase | Name | Plans | State |\n|--:|---|:-:|---|\n\
+             | 2 | Import | 1/1 | done |\n\
+             | **3** | **Sync Engine** | 1/3 | **current** |\n\
+             | 4 | Sharing | — | not started |\n"
+        ));
+        assert!(overview.contains(
+            "## Phase 3 · Sync Engine\n\n\
+             | Wave | Plan | Objective | Status |\n|:-:|:-:|---|---|\n\
+             | 1 | 01 | Every write is logged | done |\n\
+             | 2 | 02 | Conflicts | **current** |\n\
+             |  | 03 | From the plan. | **current** · *stops for you* |\n"
+        ));
         assert!(overview.contains("- Waiting on the API key"));
-        assert!(overview.ends_with("`gsd-execute-phase 3`\n"));
+        assert!(overview.ends_with("## Next\n\n`gsd-execute-phase 3`\n"));
+    }
+
+    #[test]
+    fn a_phase_says_where_it_stands_above_its_plans() {
+        let dir = project("gsd-detail");
+        let milestone = read(&DiskHost, dir.path()).unwrap();
         let detail = detail(&milestone.phases[1]);
+        assert!(detail.starts_with(
+            "# Phase 3 · Sync Engine\n\n\
+             **in progress** · 1 of 3 plans · next `gsd-execute-phase 3`\n"
+        ));
         assert!(detail.contains("1. A save made offline syncs"));
-        assert!(detail.contains("  Every write is logged\n"));
+        assert!(detail.contains("| 1 | 01 | Every write is logged | done |"));
+        assert!(!detail.contains("## Next"), "the next step heads the phase");
+        assert!(
+            super::detail(&milestone.phases[2])
+                .starts_with("# Phase 4 · Sharing\n\n**not started** · next `gsd-plan-phase 4`\n")
+        );
+        assert!(
+            super::detail(&milestone.phases[0])
+                .starts_with("# Phase 2 · Import\n\n**done** · 1 of 1 plans\n")
+        );
+    }
+
+    #[test]
+    fn a_plan_is_named_by_its_first_sentence() {
+        assert_eq!(headline("Change log"), "Change log");
+        assert_eq!(
+            headline("Pedido vira CONVERTED na hora. A exportação LGPD lista as sacolas."),
+            "Pedido vira CONVERTED na hora."
+        );
+        assert_eq!(headline("R$ 123.456,78 em 32px"), "R$ 123.456,78 em 32px");
+        assert_eq!(
+            headline(
+                "GET /public/:storeSlug/cart-restore/:token devolve a sacola revalidada pelo cardápio de hoje"
+            ),
+            "GET /public/:storeSlug/cart-restore/:token devolve a sacola…"
+        );
+        assert_eq!(cell("a | b"), "a \\| b", "a pipe would split the cell");
     }
 }

@@ -1021,6 +1021,14 @@ fn milestone_navigator(state: &SpecView) -> Navigator {
     let Some(milestone) = state.milestone() else {
         return Navigator::default();
     };
+    // Phase numbers right-aligned, so `9` and `10` start their names in
+    // one column.
+    let width = milestone
+        .phases
+        .iter()
+        .map(|phase| phase.number.chars().count())
+        .max()
+        .unwrap_or(0);
     Navigator {
         heading: milestone.version.clone(),
         badge: format!("{}%", milestone.percent),
@@ -1045,11 +1053,11 @@ fn milestone_navigator(state: &SpecView) -> Navigator {
                     let current = milestone.current == Some(at);
                     NavigatorRow::Item {
                         id,
-                        name: format!("{} · {}", phase.number, phase.name),
+                        name: format!("{:>width$}  {}", phase.number, phase.name),
                         depth: 0,
                         marker: phase_marker(phase),
                         marker_side: MarkerSide::Trailing,
-                        detail: if current { "current" } else { "" }.to_owned(),
+                        detail: String::new(),
                         selected: selected == Some(id),
                         icon: if phase.done {
                             RowIcon::Finished
@@ -1081,7 +1089,7 @@ fn phase_marker(phase: &Phase) -> Span {
         return Span::new("done".to_owned(), Tone::Success);
     }
     if phase.plans.is_empty() {
-        return Span::new(String::new(), Tone::Muted);
+        return Span::new("—".to_owned(), Tone::Faint);
     }
     Span::new(
         format!("{}/{}", phase.finished_plans(), phase.plans.len()),

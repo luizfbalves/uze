@@ -1599,11 +1599,48 @@ fn an_open_milestone_is_a_subject_of_its_own_and_where_the_surface_lands() {
     assert!(shown.subjects[0].active);
     assert_eq!(
         row_names(&state),
-        ["Overview", "", "2 · Import", "3 · Sync Engine"],
+        ["Overview", "", "2  Import", "3  Sync Engine"],
         "the overview, then the roadmap's phases"
     );
     let text = text(&state, 0..1);
     assert_eq!(text, ["v1.1 · Sync"]);
+}
+
+#[test]
+fn phase_rows_line_their_numbers_up_and_mark_what_has_no_plans() {
+    let dir = gsd_milestone_checkout("spec-milestone-rows");
+    write(
+        dir.path(),
+        ".planning/ROADMAP.md",
+        "- [x] **Phase 9: Nine**\n- [ ] **Phase 10: Ten**\n",
+    );
+    let state = opened(read_with(
+        &DiskHost,
+        dir.path(),
+        None,
+        &[GSD],
+        &ArtifactSource::Undeclared,
+    ));
+    assert_eq!(row_names(&state), ["Overview", "", " 9  Nine", "10  Ten"]);
+    let marks: Vec<(String, String)> = view(&state, space())
+        .navigator
+        .expect("a navigator")
+        .rows
+        .into_iter()
+        .filter_map(|row| match row {
+            NavigatorRow::Item { marker, detail, .. } => Some((marker.text, detail)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        marks,
+        [
+            ("executing".to_owned(), String::new()),
+            ("done".to_owned(), String::new()),
+            ("—".to_owned(), String::new()),
+        ],
+        "a phase without plans says so, and the current one takes no room from its name"
+    );
 }
 
 #[test]

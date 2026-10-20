@@ -439,6 +439,7 @@ fn default_bindings() -> Vec<Binding> {
         bind(Scope::SpaceOverview, "shift+up", Action::MoveItemUp),
         bind(Scope::SpaceOverview, "shift+down", Action::MoveItemDown),
         bind(Scope::SpaceOverview, "x", Action::DiscardChanges),
+        bind(Scope::SpaceOverview, "v", Action::ReviewCommands),
         // Clearing the space's prompts, shifted off the `x` that discards
         // edits.
         bind(Scope::SpaceOverview, "X", Action::ClearPromptHistory),
@@ -505,11 +506,11 @@ fn default_bindings() -> Vec<Binding> {
         bind(Scope::ContextMenu, "esc", Action::Dismiss),
         bind(Scope::RootPicker, "down", Action::SelectNext),
         bind(Scope::RootPicker, "up", Action::SelectPrevious),
-        // Tab walks into the highlighted directory, so a root several
-        // levels down is reached by narrowing rather than by typing.
+        // Tab completes the highlighted directory, the way a shell does, so
+        // one several levels down is reached by narrowing.
         bind(Scope::RootPicker, "tab", Action::Expand),
-        // The kind chips under the directory: two choices side by side, so
-        // the keys that walk sideways walk them.
+        // The harness the new agent runs, a field between two arrows: the
+        // keys that walk sideways walk it.
         bind(Scope::RootPicker, "left", Action::FocusPrevious),
         bind(Scope::RootPicker, "right", Action::FocusNext),
         bind(Scope::RootPicker, "enter", Action::Activate),

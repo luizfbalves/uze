@@ -3,7 +3,9 @@ title: Agents
 description: Where an agent works, how its work gets a name, and how finished work comes home
 ---
 
-`Alt+N` starts an agent and asks which one. Each agent is a tab in the sidebar.
+`Alt+N` starts an agent: choose the directory it works in, and `Enter` starts
+it with the harness you used last (`←` `→` change it). Each agent is a tab in
+the sidebar.
 
 ## Where an agent works
 
@@ -12,11 +14,6 @@ By default an agent works in your project, on your branch, like you would.
 Or it gets **a worktree of its own**: a separate checkout of the repository
 under `.worktrees/`, on a branch of its own. Two agents can then never touch
 each other's files, or yours.
-
-A new agent's worktree starts from your target branch as the remote last had
-it (`origin/main`), so it is not born behind work that already merged, even
-when your own `main` has not been pulled. When your local branch carries
-commits the remote does not, it starts from yours.
 
 - **One agent:** right-click it → **To worktree**. It moves to its own worktree
   and takes your uncommitted changes with it, as a copy. When the tree holds
@@ -28,6 +25,11 @@ commits the remote does not, it starts from yours.
   workspace:
     worktree: always   # manual (default) | always
   ```
+
+A new agent's worktree starts from your target branch as the remote last had
+it (`origin/main`), so it is not born behind work that already merged, even
+when your own `main` has not been pulled. When your local branch carries
+commits the remote does not, it starts from yours.
 
 Checkouts are reused, so a second agent does not pay for a fresh
 `node_modules/` or a cold build. An agent that ends never keeps its
@@ -170,12 +172,9 @@ takes the approval back; see
 ## Subagents
 
 An agent that splits its work across subagents asks uze for a checkout for
-each one, the same way it names its work:
-
-```bash
-uze agent work split parser   # a checkout cut from the agent's commit, printed as a path
-uze agent work join parser    # the subagent's commits land on the agent's branch
-```
+each one, cut from its own commit, and brings their commits back onto its
+branch when they are done. You do nothing: the agent does it, the way it names
+its work ([Agent CLI](/docs/reference/agent-cli#subagent-checkouts)).
 
 The subagent's checkout comes from the same pool, so it starts warm. Joining
 replays its commits onto the agent's branch with no merge commit. The checkout
@@ -218,7 +217,7 @@ The rest follow under **others**: work being delivered, published or with
 the reviewer, shelved work, delivered work, agents that worked in your own
 checkout, and agents that never changed anything. Each group is newest
 first. Select a row and it says why it is
-listed, which project it belongs to, its branch, how far it is ahead and how
+listed, which project it belongs to and the space resuming it opens in, its branch, how far it is ahead and how
 much disk its checkout takes. A checkout is never a row of its own: it is a
 fact about the agent that left it.
 
@@ -227,7 +226,8 @@ joins its commits into its agent's branch. For anything else it resumes the
 agent with a new tab: it goes back to the checkout it left when that one is
 free, or to any other (an agent that worked in your own checkout goes back
 there), with its shelf put back as uncommitted changes and its
-subagents beside it. If no space is open on its project, one is opened for it.
+subagents beside it. It opens in a space that already works in its project, or
+else in the space you are looking at; resuming never creates a space.
 Ready work also offers `i` to deliver it. Right-click a row, or press
 `Alt+.`, for the same actions as a menu.
 

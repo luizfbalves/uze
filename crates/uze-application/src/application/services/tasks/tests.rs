@@ -279,13 +279,13 @@ mod placement_tests {
             .place_new_agent(&root, Some(PlacementKind::Isolated), "claude-code", &[])
             .unwrap();
         assert_eq!(
-            crate::space_root(&placement.cwd),
-            crate::space_root(&root),
+            crate::project_root_of(&placement.cwd),
+            crate::project_root_of(&root),
             "an agent's checkout lands in the space its repository already has"
         );
         assert_eq!(
-            crate::space_root(&placement.cwd.join("crates")),
-            crate::space_root(&root),
+            crate::project_root_of(&placement.cwd.join("crates")),
+            crate::project_root_of(&root),
             "so does a subdirectory of it"
         );
     }
@@ -1035,7 +1035,7 @@ mod task_service_tests {
                         tab_id: 1,
                         tab_label: "claude".to_owned(),
                         agent_binary: "claude-code".to_owned(),
-                        agent: None,
+                        agent: Some("a1".to_owned()),
                     },
                     secret,
                 )
@@ -1053,7 +1053,7 @@ mod task_service_tests {
         );
         assert!(
             app.workspace()
-                .prompt_history(&root, 10)
+                .prompt_history(&root, "a1", 10)
                 .iter()
                 .any(|entry| entry.preview.contains("hunter2")),
             "while the record it wrote still holds its preview"

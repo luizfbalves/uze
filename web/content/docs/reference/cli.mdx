@@ -37,7 +37,7 @@ uze status -m                 # this machine: every installed plugin
 
 `uze install` creates `agents.yaml` when the project has none, records what it
 resolved in `agents.lock`, drops from the lock what `agents.yaml` no longer
-declares, and leaves `AGENTS.md` reconciled. `install`, `update` and `status`
+declares, and copies the declared plugins' rules into `.agents/rules/`. `install`, `update` and `status`
 take a project directory, and otherwise act on the project you are in.
 
 | Flag | On | Does |
@@ -72,8 +72,8 @@ uze workspace allow [dir]   # read this project's setup and gate commands, and a
 uze workspace revoke [dir]  # withdraw that approval
 ```
 
-Run inside one of the workspace's own panes, `uze workspace` opens a space for
-that directory in the workspace already running.
+Run inside one of the workspace's own panes, `uze workspace` selects the space
+working in that project in the workspace already running, or opens one for it.
 
 `allow` needs a person at a terminal, and refuses inside an agent uze launched:
 the commands a project runs are yours to approve, never its agents'.

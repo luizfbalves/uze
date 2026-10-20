@@ -57,15 +57,24 @@ starts with `*`. Each pattern is either:
 - a file name, with no `/`, which matches at any depth: `*.sql`, `Makefile`
 - a path that starts with `**/`: `**/src/ui/**`, `**/migrations/*.sql`
 
-Inside a pattern, `**` matches any number of directories, `*` matches within
-one name, `?` matches one character, and `[ab]` or `[0-9]` matches one
-character of a set. Everything else, spaces included, is matched literally.
+Inside a pattern, `**` matches any number of whole directories, `*` matches
+within one name, `?` matches one character, and `[ab]` or `[0-9]` matches one
+character of a set. Any other character, spaces included, is matched
+literally, except the ones listed below.
 
-A directory pattern has to start with `**/` because Antigravity matches
-against the file's full path: `src/ui/**` would never fire there, so uze
-reports it rather than deliver it to some agents and not others. Braces
-(`{a,b}`), negated sets (`[!a]`) and a leading `/`, `./` or `../` are
-reported the same way. Write two patterns instead of braces.
+A rule must match the same files in every agent, so uze reports a pattern
+that could be read two ways, rather than deliver the rule to some agents and
+not others:
+
+- a `/` in a pattern that does not start with `**/`: Antigravity matches
+  against the file's full path, so `src/ui/**` would never fire there
+- braces (`{a,b}`): write two patterns instead
+- `!` anywhere, a negated set (`[^a]`), or an empty or unclosed `[`
+- `(`, `)`, `|` or `\`
+- a leading `/`, a `.` or `..` segment, an empty segment (`a//b`) or a
+  trailing `/`
+- `**` that is not a whole segment, as in `src/**.ts`
+- an empty pattern, whitespace other than a space, or a control character
 
 ## Write a rule as a convention
 
@@ -97,14 +106,8 @@ and `uze status` says so.
 When the same conventions hold for every repository of a team, write them
 once in a plugin instead of copying files between projects. A plugin ships
 rules as Markdown files directly under its `rules/` directory, in the same
-format. Scaffold one with:
-
-```bash
-uze agent plugin create acme-conventions --market acme --rules
-```
-
-`uze agent plugin check` validates the plugin's rules with the same checks as
-`uze agent rules check`. Patterns are matched against paths relative to the
+format. The `uze:author` skill scaffolds one for you, and checks the rules
+before you install it. Patterns are matched against paths relative to the
 project that receives the rule.
 
 ### Declaring the plugin
@@ -172,19 +175,13 @@ take ownership of the change by moving it out of the plugin's folder into
 
 ## Check them
 
-```bash
-uze agent rules check
-```
-
-Validates every rule offline, the ones `.agents/rules.json` registers
-included, and names each file that is not one and why, or the manifest when it
-does not parse.
-`uze status` reports the same: how many rules of each kind, any file that is
-not a rule, each declared plugin's rules and whether their copies match the
-lock, and how each installed agent receives them. It never prints a rule's
-text.
+`uze status` says how many rules of each kind the project has, any file that
+is not a rule and why, each declared plugin's rules and whether their copies
+match the lock, and how each installed agent receives them. It never prints a
+rule's text. An offline check that fails a build is in
+[Agent CLI](/docs/reference/agent-cli).
 
 In the workspace, the harness's details under **Manage** and the agent's
-section of the space view show `.agents/rules` beside `AGENTS.md`: **Native**,
+overview (`Alt+O`) show `.agents/rules` beside `AGENTS.md`: **Native**,
 **Rules engine**, **Run uze setup** when the engine has not been installed for
 that agent yet, or **Not supported**.

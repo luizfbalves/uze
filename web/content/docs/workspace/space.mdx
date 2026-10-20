@@ -1,43 +1,34 @@
 ---
 title: Space
-description: One screen for a project in the workspace, covering what its agents were asked, how they work, its plugins, its memory and its worktrees
+description: One screen for the agent in front, covering what it was asked, its settings, and its project's plugins, memory and worktrees
 ---
 
 <Demo
   cast="/casts/space.cast"
-  posterAt={21}
-  alt="The space overview: the prompts asked in the space with what reaches the agent in front, the agents.yaml settings as a form, the project's plugins, the facts its agents kept, and the worktrees its agents work in."
-  caption="Alt+O opens it over the tab in front, from an agent or a shell."
+  posterAt={20.8}
+  alt="The agent overview: the prompts the agent was given with what reaches it, its project's agents.yaml settings as a form, the project's plugins, the facts its agents kept, and the worktrees its agents work in."
+  caption="Alt+O opens it over the agent in front, or a shell beside it."
 />
 
-`Alt+O`, or the `⋯` button at the right end of the tab strip, opens the
-overview of the space you are in. It stands where the pane is, over the tab
-in front, and `Alt+O` or `Esc` puts it away again. Selecting a tab, starting
-an agent or opening Spec, Architect or Code also puts it away. When you
-open it again it is on the section you left, and it reads the project again.
+The overview is one screen about the agent in front: what it was asked, its
+settings, and its project's plugins, memory and worktrees. Press `Alt+O`, or
+click the `⋯` button at the right end of the tab strip, to open it. `Alt+O` or
+`Esc` puts it away.
 
-The top line names the space and its directory, and counts its agents:
-**running** in a tab, **ready** to be delivered, and **preserved**, meaning
-work kept for an agent no tab holds. Under it are five sections. `1` to `5`
-jump to one and `←` `→` move between them. A section with something to look
-at carries a mark, and its first line says what it is. The foot shows the
-keys for the section you are on and, on the right, how many things are left
-to check. Click that count for the whole list.
-
-The detail of the row you are on opens in a drawer on the right. Drag its
-edge to make it wider. On a narrow screen it opens over the list instead,
-with `Enter`, and closes with `Esc`.
+Its five sections are **Agent**, **Settings**, **Plugins**, **Memory** and
+**Worktrees**. `1` to `5` jump to one, and `←` `→` move between them. Select a
+row to read its detail in the drawer on the right.
 
 ## Agent
 
-Every prompt asked in this space, newest first and grouped by age: the
-harness, when it was asked, by which agent, and the prompt itself.
-`Enter` copies the selected prompt. `X` twice clears the space's history.
+Every prompt this agent was given, newest first and grouped by age: the
+harness, when it was asked, and the prompt itself. `Enter` copies the
+selected prompt. `X` clears this agent's prompts, and no other's, after
+asking, with the keyboard on **cancel**.
 
-The drawer shows the agent in front: its harness, its checkout, and what of
-the project reaches it (`AGENTS.md`, project skills and agents) and how it
-receives skills, MCP servers, agents and hooks. Open the overview from an
-agent's tab to see this; from a shell there is no agent in front.
+The drawer shows the agent: its harness, its checkout, and what of the
+project reaches it (`AGENTS.md`, project skills and agents) and how it
+receives skills, MCP servers, agents and hooks.
 
 ## Settings
 
@@ -57,7 +48,11 @@ linked files, tracked directories for artifacts. An agent action is a text
 box of its own, where `Enter` starts a new line and `Ctrl+S` finishes.
 
 Each change is written to `agents.yaml` as soon as you make it, and the key
-shows **saved**. The file is read again before every write, its comments are
+shows **saved**. It is the file of the checkout the agent works in: for an
+agent in the project's own tree, the project's, which places every new
+agent; for an agent in a worktree, that worktree's, so the change is part of
+its work, committed and delivered with it, and new agents follow the
+project's file until then. The file is read again before every write, its comments are
 kept, and the result is checked by the same parser the workspace reads it
 with: a change that would not parse is refused, shown at its key, and nothing
 is written. `x` discards refused changes. When the file uses something the
@@ -66,15 +61,15 @@ says why.
 
 `Setup` and `Gate` are commands from the repository, so a change to either
 waits for your approval again before anything runs. The drawer's **Review**
-button opens the same approval as `uze workspace allow`; see
+button, or `v`, opens the same approval as `uze workspace allow`; see
 [Approving the commands](/docs/reference/project-files#approving-the-commands).
 
 The drawer explains the key you are on, its default and the value it has now.
 
 ## Plugins
 
-The plugins the project declares, with their marketplace, whether they carry
-instructions into `AGENTS.md`, the commit installed and where each stands:
+The plugins the project declares, with their marketplace, the commit installed
+and where each stands:
 installed, linked, behind or with an update available, different from
 `agents.lock`, or missing. Below the list, anything that has drifted between
 `agents.yaml`, `agents.lock` and the store is spelled out. `uze install`
@@ -94,18 +89,16 @@ Every agent uze launches is given an index of that memory in its context,
 whatever its harness: every fact by name, then as many with their
 description as there is room for, feedback first, and how to read one in
 full. A fact that cites a file this checkout no longer has is marked, so an
-agent checks it before relying on it. Agents write facts with
-`uze agent memory`. A harness that keeps memory of its own, like Claude
+agent checks it before relying on it. Agents write facts through uze, on any
+harness ([Agent CLI](/docs/reference/agent-cli)). A harness that keeps memory of its own, like Claude
 Code, goes on writing it there, and uze reads it where it is rather than
 copying it. A machine fact an agent proposes waits for your approval before
 it reaches any agent. Facts are notes, never instructions, and memory holds
 no secrets.
 
-This section lists the project's facts: their name, kind, origin (the
-harness that wrote it, or `uze` for one written outside an agent) and when
-they changed. The line
-under the list counts the machine facts that reach agents here too. `/`
-searches by name, description, kind and origin as you type, and `Esc`
+This section lists the project's facts and the machine's together, newest
+first: their name, kind, scope, origin (the harness that wrote it, or `uze`
+for one written outside an agent) and when they changed. `/` searches by name, description, kind, scope and origin as you type, and `Esc`
 clears the search. `Enter` reads the selected fact in the drawer, which also
 shows the file it lives in; the wheel or `PageUp`/`PageDown` scrolls a long
 one. Nothing is changed from here: a fact is a file,
@@ -113,7 +106,7 @@ and you can edit it by hand.
 
 ## Worktrees
 
-The checkouts uze made for this space's agents and their subagents, as
+The checkouts uze made for the project's agents and their subagents, as
 cards: the branch, its size on disk, how long since it changed, and how far
 ahead it is. They are sorted by what they need from you: **ready** to
 deliver, **to join** into the agent that split it, **kept** work nobody
@@ -128,3 +121,20 @@ commit on it. It refuses if anything is working inside it, if an agent holds
 it or if it has uncommitted work. See
 [Where an agent works](/docs/workspace/agents#where-an-agent-works) for how
 checkouts are reused.
+
+## Moving around
+
+The overview is there only for an agent and the shells opened beside it: a
+shell of the space works in no project, so it has none. It stands where the
+pane is, over the tab in front. Selecting another agent turns it to that
+agent; selecting the space's row or one of its shells, or opening Spec,
+Architect or Code, puts it away. When you open it again it is on the section
+you left, and it reads the project again.
+
+The top line names the agent and its directory. A section with something to
+look at carries a mark, and its first line says what it is. The foot shows the
+keys for the section you are on and, on the right, how many things are left
+to check. Click that count for the whole list.
+
+Drag the drawer's edge to make it wider. On a narrow screen it opens over the
+list instead, with `Enter`, and closes with `Esc`.

@@ -1,10 +1,10 @@
-//! Choosing the directory a new space is born from.
+//! Choosing the directory a new agent works in.
 //!
-//! A space is born from a root, and that root is a directory that already
-//! exists — so the prompt is a filter over real directories rather than a
-//! free-text path. What the user types names a directory to list and a
-//! segment to match inside it: the list narrows on every keystroke, `Tab`
-//! completes the row it lands on, and `Enter` creates the space there.
+//! An agent works in a directory that already exists — so the prompt is a
+//! filter over real directories rather than a free-text path. What the user
+//! types names a directory to list and a segment to match inside it: the
+//! list narrows on every keystroke, `Tab` completes the row it lands on,
+//! and `Enter` takes it.
 //!
 //! **The input is the path.** A separator is a character like any other:
 //! the text before the last one names the directory to list, the text
@@ -25,9 +25,18 @@ use std::path::{Path, PathBuf};
 pub(super) struct Candidate {
     pub(super) name: String,
     pub(super) path: PathBuf,
+    /// Whether it is a Git repository, once asked: only for the rows a
+    /// listing leads with, since asking stats a file and a listing of a
+    /// large directory on a slow mount would stall typing.
+    pub(super) repository: Option<bool>,
 }
 
-/// Open state of the sidebar's "+ space" prompt; `None` on the model when
+/// How many of the matches a listing leads with are asked whether they are
+/// a repository — more than the popup shows, fewer than a large directory
+/// holds.
+const REPOSITORIES_ASKED: usize = 32;
+
+/// Open state of the new agent's directory prompt; `None` on the model when
 /// closed. Holds its own listing so a keystroke only re-reads the
 /// filesystem when it changes which directory is being listed — typing a
 /// name filters what was already read.
@@ -56,19 +65,24 @@ pub(super) struct RootPicker {
     /// match first.
     matched: Vec<usize>,
     selected: usize,
+    /// The first match the window shows. Kept rather than derived from the
+    /// selection: the pointer selects the row it is over, and a window
+    /// that put the selection at its foot moved a new row under the
+    /// pointer on every frame, which the pointer then selected.
+    top: std::cell::Cell<usize>,
+    /// How many rows the window last showed, for the wheel to scroll by.
+    shown: std::cell::Cell<usize>,
     /// The project the operator is standing in, when it is one of the
     /// rows. The prompt opens on it and returns to it whenever the
-    /// listing is read again with nothing typed, so "another space over
-    /// this project" stays one `Enter` away while the listing shows
-    /// everywhere else they could go.
+    /// listing is read again with nothing typed, so "another agent in this
+    /// project" stays one `Enter` away while the listing shows everywhere
+    /// else they could go.
     marked: Option<PathBuf>,
     /// The directory the prompt is on right now — the row chosen in the
     /// listing, or the directory being listed — resolved when the input or
     /// the selection changes rather than on every frame: it probes the
     /// filesystem.
     picked: Option<PathBuf>,
-    /// The repository or workspace `picked` belongs to.
-    landed: Option<PathBuf>,
 }
 
 impl RootPicker {
@@ -79,7 +93,7 @@ impl RootPicker {
     /// projects are — the same premise the prompt resolves typing
     /// against — and what the prompt is *on* is where the operator
     /// already is, so neither the walk to another project nor a second
-    /// space over this one costs a gesture the other one saves.
+    /// agent in this one costs a gesture the other one saves.
     pub(super) fn opened_in(prefill: &str, standing_in: Option<&Path>) -> Self {
         // Trailing separators go, but never all of them: `/` trimmed to
         // nothing is a relative path, and a relative path is resolved
@@ -96,9 +110,10 @@ impl RootPicker {
             listing: Vec::new(),
             matched: Vec::new(),
             selected: 0,
+            top: std::cell::Cell::new(0),
+            shown: std::cell::Cell::new(1),
             marked: standing_in.map(Path::to_path_buf),
             picked: None,
-            landed: None,
         };
         picker.refresh();
         picker
@@ -108,8 +123,14 @@ impl RootPicker {
         &self.input
     }
 
+    /// Where what is typed starts from.
+    pub(super) fn origin(&self) -> &Path {
+        &self.origin
+    }
+
     /// The directory being listed, which is also what `Enter` takes while
     /// nothing has been chosen in it.
+    #[cfg(test)]
     pub(super) fn base(&self) -> &Path {
         &self.base
     }
@@ -131,7 +152,7 @@ impl RootPicker {
     /// `origin` behind the way they do in a shell, and everything else is
     /// read from where the prompt opened. Rebuilt from its components, so
     /// the path is spelled with the platform's own separator whichever one
-    /// was typed: a space is recorded at the root this answers.
+    /// was typed: an agent is placed from the directory this answers.
     fn resolve(&self, typed: &str) -> PathBuf {
         let landed = if typed.starts_with('~') || typed.starts_with(std::path::is_separator) {
             expand_home(typed)
@@ -167,9 +188,35 @@ impl RootPicker {
     }
 
     /// First match to draw when only `height` rows are available — the
-    /// list scrolls just enough to keep the selection on screen.
+    /// list scrolls only when the selection leaves the window, and only
+    /// far enough to bring it back.
     pub(super) fn window_start(&self, height: usize) -> usize {
-        (self.selected + 1).saturating_sub(height.max(1))
+        let height = height.max(1);
+        let mut top = self.top.get();
+        if self.selected < top {
+            top = self.selected;
+        } else if self.selected >= top + height {
+            top = self.selected + 1 - height;
+        }
+        top = top.min(self.matched.len().saturating_sub(height));
+        self.top.set(top);
+        self.shown.set(height);
+        top
+    }
+
+    /// Scrolls the window by `delta` rows, the way the wheel does, taking
+    /// the selection along only as far as it must to stay on screen.
+    pub(super) fn scroll(&mut self, delta: isize) {
+        let shown = self.shown.get();
+        let last_top = self.matched.len().saturating_sub(shown);
+        let top = self.top.get().saturating_add_signed(delta).min(last_top);
+        self.top.set(top);
+        if self.matched.is_empty() {
+            return;
+        }
+        self.selected = self.selected.clamp(top, top + shown - 1);
+        self.touched = true;
+        self.reland();
     }
 
     pub(super) fn select(&mut self, index: usize) {
@@ -236,23 +283,16 @@ impl RootPicker {
         self.refresh();
     }
 
-    /// The root a space would be created at right now: the selected
+    /// The directory a new agent would work in right now: the selected
     /// directory, or — with nothing matching — the typed path itself when
-    /// it already names a directory. `None` means there is nothing to
-    /// create yet, and the prompt stays open.
+    /// it already names a directory. `None` means there is nothing to take
+    /// yet, and the prompt stays open.
     ///
-    /// The answer is the *space's* root, not the directory literally
-    /// landed on: `uze_application::space_root` maps a subdirectory to the
-    /// project it belongs to and an agent's slot to the repository the
-    /// slot was cut from. The attach path already resolves its launch
-    /// directory that way; a directory picked here is the same question
-    /// asked with the mouse, and answering it differently is what put a
-    /// `.worktrees/<id>` space in the sidebar beside the space whose agent
-    /// was working in it.
+    /// An agent's slot answers the repository the slot was cut from: a new
+    /// agent placed there is an agent of the project, placed by its policy,
+    /// never one standing in another agent's checkout (see
+    /// `uze_application::slot_key`).
     pub(super) fn chosen(&self) -> Option<PathBuf> {
-        // An agent's own checkout is still the repository it was cut
-        // from — a space there is a space in the project, not in one
-        // agent's working directory (see `uze_application::slot_key`).
         Some(uze_application::slot_key(self.picked.as_deref()?))
     }
 
@@ -263,8 +303,8 @@ impl RootPicker {
             // answer, which is what `Enter` on an untouched prompt takes.
             // A name typed that matches nothing is not that — it is a
             // request for a directory there is no row for, and the prompt
-            // stays open rather than quietly creating the space one level
-            // up.
+            // stays open rather than quietly taking the directory one
+            // level up.
             None => {
                 // The *segment*, not the whole line: a path typed out
                 // with its separator at the end names the directory it
@@ -280,15 +320,13 @@ impl RootPicker {
 
     /// Re-resolves what the prompt is on after the selection moved.
     fn reland(&mut self) {
-        let picked = self.resolve_picked();
-        self.landed = picked.as_deref().map(uze_application::space_root);
-        self.picked = picked;
+        self.picked = self.resolve_picked();
     }
 
     /// Reads the directory the line names and matches the segment inside
-    /// it. Every directory is offered: a space is a directory somebody
-    /// opened, and any directory can be one — whether an agent in it can
-    /// be isolated is the agent's question, asked where isolation is.
+    /// it. Every directory is offered: an agent may work in any directory —
+    /// whether it can be isolated there is the agent's question, asked
+    /// where isolation is.
     fn refresh(&mut self) {
         let (base, segment) = self.split_input();
         let needle = segment.to_lowercase();
@@ -313,8 +351,16 @@ impl RootPicker {
             }
         }
         leading.append(&mut inner);
+        for index in leading.iter().take(REPOSITORIES_ASKED) {
+            let candidate = &mut self.listing[*index];
+            if candidate.repository.is_none() {
+                let marker = candidate.path.join(".git");
+                candidate.repository = Some(marker.is_file() || marker.join("HEAD").is_file());
+            }
+        }
         self.matched = leading;
         self.selected = 0;
+        self.top.set(0);
         // Typing is choosing: the best match leads the list, and it is the
         // one `Enter` takes. A line ending in a separator has typed no
         // segment, so it has chosen nothing inside what it names.
@@ -355,6 +401,7 @@ fn read_directories(directory: &Path) -> Vec<Candidate> {
         .map(|entry| Candidate {
             name: entry.file_name().to_string_lossy().into_owned(),
             path: entry.path(),
+            repository: None,
         })
         .collect();
     candidates.sort_by_key(|candidate| candidate.name.to_lowercase());

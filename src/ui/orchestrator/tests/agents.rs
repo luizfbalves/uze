@@ -268,21 +268,15 @@ fn the_selected_agent_lights_its_stretch_of_the_gutter_and_nothing_else() {
     );
 }
 
+/// A space of shells works in no project, so nothing is said under its
+/// name: where its shell stands is the shell's own business.
 #[test]
-fn an_empty_space_draws_its_root_as_a_caption() {
-    let session = session("/repo");
-    let model = model_of(session);
-    let Sidebar { rows, hits, .. } = sidebar(&model, &identities_in_the_root());
+fn an_empty_space_draws_no_caption() {
+    let model = model_of(session("/repo"));
+    let Sidebar { rows, .. } = sidebar(&model, &identities_in_the_root());
     assert!(
-        rows.iter().any(|row| without_chrome(row) == "/repo"),
+        !rows.iter().any(|row| without_chrome(row) == "/repo"),
         "{rows:?}"
-    );
-    assert!(
-        hits.iter()
-            .filter(|(_, hit)| matches!(hit, WorkspaceHit::SelectSpace(_)))
-            .count()
-            >= 2,
-        "the caption selects the space like the header does"
     );
 }
 
@@ -716,6 +710,11 @@ fn agents_sit_one_step_inside_their_space() {
             .unwrap_or_else(|| panic!("{text:?} in {row:?}"));
         row[..byte].chars().count()
     };
+    // The harness stands against the row's end, the trailing column every
+    // caption in the column ends in: one pad off the divider.
+    let at_the_end = |row: &str, text: &str| {
+        column_of(row, text) + text.chars().count() == row.chars().count() - 2
+    };
     use crate::ui::theme::Symbol;
     let idle = theme::glyph(Symbol::StatusIdle);
     let tree = three_spaces();
@@ -726,7 +725,10 @@ fn agents_sit_one_step_inside_their_space() {
     assert_eq!(column_of(&rows[header + 1], &idle), fold, "{rows:?}");
     let agent = column_of(&rows[header + 1], "shell");
     assert_eq!(agent, name, "{rows:?}");
-    assert_eq!(column_of(&rows[header + 2], "agent"), agent, "{rows:?}");
+    // Behind, the row says where its agent works and not what runs it.
+    assert!(!rows[header + 2].contains("agent"), "{rows:?}");
+    let front = space_header(&hits, SpaceId(3)).y as usize;
+    assert!(at_the_end(&rows[front + 2], "agent"), "{rows:?}");
 
     let flat = agents_in_the_root_session();
     let Sidebar { rows, hits, .. } = sidebar(&flat, &identities_in_the_root());
@@ -735,7 +737,7 @@ fn agents_sit_one_step_inside_their_space() {
     let fold = column_of(&rows[header], &theme::glyph(Symbol::ChevronExpanded));
     assert_eq!(column_of(&rows[header + 1], &idle), fold, "{rows:?}");
     assert_eq!(column_of(&rows[header + 1], "agent 1"), name, "{rows:?}");
-    assert_eq!(column_of(&rows[header + 2], "claude"), name, "{rows:?}");
+    assert!(at_the_end(&rows[header + 2], "claude"), "{rows:?}");
 
     let both = a_space_with_both_groups();
     let Sidebar { rows, hits, .. } = sidebar(&both, &identities_in_the_root());
@@ -754,10 +756,9 @@ fn agents_sit_one_step_inside_their_space() {
         name + 1,
         "a step further in: {rows:?}"
     );
-    assert_eq!(
-        column_of(&rows[agents[1] as usize], "claude"),
-        name + 1,
-        "and its caption keeps under its name: {rows:?}"
+    assert!(
+        at_the_end(&rows[agents[1] as usize], "claude"),
+        "and its harness against the row's end: {rows:?}"
     );
 }
 
@@ -912,5 +913,60 @@ fn clicking_the_agent_you_are_already_in_selects_the_agent_itself() {
             .iter()
             .any(|request| matches!(request, ClientRequest::SelectTab { tab } if *tab == first)),
         "the agent's own tab"
+    );
+}
+
+/// Work resumed takes the operator to the space it lands in, wherever that
+/// is: it was asked for now. A new agent asked for in one space does not,
+/// since the operator may have moved on while its checkout was prepared.
+#[test]
+fn resumed_work_takes_the_operator_to_its_space() {
+    let repository = uze_testkit::git::Repository::new("orchestrator-resume-follows");
+    let root = repository.root().to_path_buf();
+    let home = UzeHome::at(uze_testkit::temp::scratch(
+        "orchestrator-resume-follows-home",
+    ));
+    let app = uze_application::UzeApplication::new(home.clone(), Vec::new());
+    let place = || {
+        app.workspace()
+            .place_new_agent(&root, None, "claude-code", &[])
+            .expect("the agent is placed")
+    };
+    let model = three_spaces();
+    let origin = model.session.as_ref().unwrap().workspace.spaces[0].id;
+    let mut driven = driven(model, &home);
+    let selects = |sent: &[ClientRequest]| {
+        sent.iter()
+            .any(|request| matches!(request, ClientRequest::SelectSpace { .. }))
+    };
+
+    driven.placements_answered(super::PlacementResolution {
+        label: "agent 2".to_owned(),
+        command: vec!["claude".to_owned()],
+        placement: Ok(place()),
+        replacing: None,
+        space: Some(origin),
+    });
+    let sent = driven.sent();
+    assert!(!selects(&sent), "a new agent waits in its space: {sent:?}");
+
+    driven.placements_answered(super::PlacementResolution {
+        label: "agent 3".to_owned(),
+        command: vec!["claude".to_owned()],
+        placement: Ok(place()),
+        replacing: None,
+        space: None,
+    });
+    let sent = driven.sent();
+    let created = sent.iter().find_map(|request| match request {
+        ClientRequest::CreateTab { space, .. } => *space,
+        _ => None,
+    });
+    assert!(
+        sent.iter().any(|request| matches!(
+            request,
+            ClientRequest::SelectSpace { space } if Some(*space) == created
+        )),
+        "resumed work is followed into the space it opened in: {sent:?}"
     );
 }

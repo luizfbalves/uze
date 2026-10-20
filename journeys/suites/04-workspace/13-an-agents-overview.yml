@@ -1,0 +1,94 @@
+journey: an agent's overview opens without a shell, and edits its own checkout's agents.yaml in place
+tags: [gate, tui, workspace]
+proves: web/content/docs/workspace/space.mdx
+about: |
+  The overview is a surface of the client, not a program in a pane: opening
+  it over an agent starts nothing on the machine. Its Settings section is a
+  form over the `workspace:` section of the `agents.yaml` in the checkout the
+  agent works in, and a change made there is written to that file as soon as
+  it is made, with the comments it already had kept where they were. For an
+  agent in a worktree that is the worktree's file: the change is part of its
+  work, and the project's own file, which places every new agent, is left
+  as it was.
+
+  Every check reads the machine: the shells the world is running, and the
+  file on disk. Screen text is only the gate that a gesture landed.
+
+world:
+  project: demo-app
+  manifest: |
+    # The team's settings, kept by hand.
+    workspace:
+      worktree: always # every agent in a checkout of its own
+      target: main
+      slots: 2
+
+scenes:
+  - scene: an agent works in the project
+    when:
+      - open: ["{uze}", "workspace"]
+        say: uze opens on the project
+        expect: demo-app
+        expect_timeout: 20
+        pause: 1.0
+      - click: "new"
+        say: open the new-agent popup
+        in: sidebar
+        expect: 'harness .*Claude Code'
+      - type: "{project}"
+        say: start an agent in the project, with Claude Code
+        # The tab, not the header's `agent 1: preparing`: the tab opens
+        # once the checkout exists.
+        expect: 'agent 1(?!: preparing)'
+        expect_timeout: 90
+        pause: 1.5
+    then:
+      - process: { matching: claude, cwd: "/.worktrees/", alive: true }
+        about: the agent is running in its own checkout
+      - capture: { name: shells, processes: { matching: "{shell}" } }
+        about: the shells the world holds before the overview opens
+
+  - scene: the overview opens over the agent and starts nothing
+    when:
+      - key: "M-o"
+        say: open the agent's overview
+        expect: Settings
+        expect_timeout: 10
+        pause: 1.0
+    then:
+      - process: { matching: "{shell}", same_as: shells }
+        about: opening the overview started no shell, nor anything else in a pane
+
+  - scene: a setting changed in the overview is written to the worktree's agents.yaml, comments kept
+    when:
+      - key: "2"
+        say: show the Settings section
+        expect: Slots
+        pause: 0.5
+      - key: "Down"
+        say: move onto Slots
+        expect: Slots
+        pause: 0.3
+      # Typed rather than sent as a key name: a character every platform's
+      # terminal delivers the same way.
+      - type: "+"
+        submit: false
+        say: one more slot
+        # The drawer's value, which reads the change back: the section's
+        # own heading says "saved" whatever was written.
+        expect: 'value\s+3'
+        expect_timeout: 20
+        pause: 1.5
+    then:
+      - file: "{project}/.worktrees/*/agents.yaml"
+        contains: "slots: 3"
+        about: the change is in the agent's worktree, on disk
+      - file: "{project}/agents.yaml"
+        excludes: "slots: 3"
+        about: and the project's own file, which places new agents, is untouched
+      - file: "{project}/.worktrees/*/agents.yaml"
+        contains: "# The team's settings, kept by hand."
+        about: the comment above the section is kept
+      - file: "{project}/.worktrees/*/agents.yaml"
+        contains: "# every agent in a checkout of its own"
+        about: and the comment beside a key it did not touch

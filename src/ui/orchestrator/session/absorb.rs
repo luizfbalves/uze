@@ -339,7 +339,7 @@ impl Attach<'_> {
         }
         // A directory the sidebar names is read the moment it is known,
         // not when its pane next goes quiet or on the refresh clock: a
-        // folded space's root or an agent nobody selected otherwise
+        // project a folded space works in or an agent nobody selected otherwise
         // showed its path for as long as `TASK_REFRESH` before its branch.
         let unread = self.model.unread_named_directories(&self.identities);
         for cwd in &unread {
@@ -382,13 +382,15 @@ impl Attach<'_> {
             // from the disk rather than from a quirk of how one kernel
             // renames what it lost.
             self.model.occupancy_stale = true;
-            // Every space's header, not only the selected pane's: a push
-            // or a pull made from a terminal leaves nothing behind for any
-            // other trigger to notice, and a folded space's `↑1` stayed up
-            // until one of its agents happened to go quiet.
-            let directories: Vec<PathBuf> = selected_pane_cwd(&self.model)
+            // Every project agents work in, not only the selected pane's: a
+            // push or a pull made from a terminal leaves nothing behind for
+            // any other trigger to notice, and a folded space's `↑1` stayed
+            // up until one of its agents happened to go quiet.
+            let directories: Vec<PathBuf> = self
+                .model
+                .focused_cwd()
                 .into_iter()
-                .chain(self.model.space_directories(&self.identities))
+                .chain(self.model.working_projects())
                 .collect();
             for cwd in &directories {
                 self.model
@@ -422,7 +424,11 @@ impl Attach<'_> {
             self.model.remembered.checkout_watch_pending = true;
             spawn_checkout_watch(
                 self.home,
-                self.model.watched_checkouts(&self.identities),
+                self.model.watched_checkouts(),
+                self.model
+                    .space_overview
+                    .as_ref()
+                    .map(|overview| overview.root.clone()),
                 self.channels.checkout_stamps.sender.clone(),
             );
         }
@@ -435,7 +441,7 @@ impl Attach<'_> {
             self.model.remembered.last_target_sync = Some(Instant::now());
             spawn_target_sync(
                 self.home,
-                self.model.space_directories(&self.identities),
+                self.model.working_projects(),
                 self.channels.target_syncs.sender.clone(),
             );
         }
@@ -512,6 +518,27 @@ impl Attach<'_> {
     pub(in crate::ui::orchestrator) fn absorb_checkout_stamps(&mut self) {
         while let Ok(resolution) = self.channels.checkout_stamps.receiver.try_recv() {
             self.model.remembered.checkout_watch_pending = false;
+            // What the open overview's project declares moved — an edit by
+            // hand, an install, an agent writing `AGENTS.md` — so the
+            // overview is read again. Its first read only sets the stamp:
+            // the overview just read it.
+            if let Some(declaration) = resolution.declaration {
+                let before = self
+                    .model
+                    .remembered
+                    .declaration_stamp
+                    .replace(declaration.clone());
+                let moved = before
+                    .is_some_and(|(root, stamp)| root == declaration.0 && stamp != declaration.1);
+                let still_open = self
+                    .model
+                    .space_overview
+                    .as_ref()
+                    .is_some_and(|overview| overview.root == declaration.0);
+                if moved && still_open {
+                    self.refresh_space_overview();
+                }
+            }
             // Each answer is every checkout watched now: one no longer
             // asked about is forgotten, so coming back is a first read.
             let watched: BTreeSet<&PathBuf> = resolution

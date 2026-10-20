@@ -165,11 +165,11 @@ fn an_unstamped_tab_is_bound_to_nothing() {
     assert!(model.lost_task(tab).is_none());
 }
 
-/// An agent in the root holds no checkout, so no slot is released when its tab
-/// closes: the agent leaving the tabs is the only sign it has ended,
-/// and it must reconcile the space roots such an agent is keyed by.
+/// An agent in its project's own tree holds no checkout, so no slot is
+/// released when its tab closes: the agent leaving the tabs is the only
+/// sign it has ended, and it must reconcile the project it worked in.
 #[test]
-fn an_agent_losing_its_last_tab_reconciles_the_space_roots() {
+fn an_agent_losing_its_last_tab_reconciles_its_project() {
     let mut model = model_of(session("/plain"));
     stamp_first_tab(&mut model, "ten4nt");
     let home = UzeHome::at(uze_testkit::temp::scratch("sidebar-in-the-root-left"));
@@ -192,7 +192,77 @@ fn an_agent_losing_its_last_tab_reconciles_the_space_roots() {
     sync_slot_occupancy(&mut model, &home, &sender, &evaluations);
     assert!(
         model.occupancy_pending,
-        "its roots are reconciled once the agent has no tab"
+        "its project is reconciled once the agent has no tab"
+    );
+}
+
+/// Where an agent's tab opens: in the space of the tab it takes over from
+/// (an isolation, a switch, a resume of a lost checkout); for work resumed
+/// from recent, in a space working in its project even when another is in
+/// front, else in the one in front. Never a space of its own.
+#[test]
+fn an_agent_lands_in_its_tabs_space_or_where_its_project_is_worked() {
+    let model = three_spaces();
+    let session = model.session.as_ref().unwrap();
+    let (one, three) = (
+        session.workspace.spaces[0].id,
+        session.workspace.spaces[2].id,
+    );
+    assert_eq!(session.workspace.selected_space, three, "three is in front");
+    let tab_of_one = session.workspace.spaces[0].tabs[0].id;
+
+    assert_eq!(
+        model.landing_space(None, Some(tab_of_one), Path::new("/elsewhere")),
+        Some(one),
+        "an isolated or switched agent stays in its tab's space"
+    );
+    assert_eq!(
+        model.landing_space(None, None, Path::new("/one")),
+        Some(one),
+        "resumed work lands in the space working in its project"
+    );
+    assert_eq!(
+        model.landing_space(None, None, Path::new("/nowhere")),
+        Some(three),
+        "and in the space in front when none works there"
+    );
+}
+
+/// What the client keeps of where agents work follows the agents: a
+/// project an agent left is handed to the next sweep once, and the
+/// directories it stood in are not kept for the life of the client.
+#[test]
+fn a_project_an_agent_left_is_swept_once_and_not_kept() {
+    let mut model = agent_session_in("/front");
+    assert!(model.projects.contains_key(Path::new("/front")));
+
+    first_tab_mut(&mut model).pane.process = "bash".into();
+    model.note_space_projects(&identities_fixture());
+
+    assert!(
+        model.projects.is_empty(),
+        "the directory no agent stands in is still kept"
+    );
+    assert!(
+        model.left_projects.contains(Path::new("/front")),
+        "the project the agent left is not handed to the sweep"
+    );
+
+    let home = UzeHome::at(uze_testkit::temp::scratch(
+        "orchestrator-left-project-swept",
+    ));
+    let (sender, _receiver) = std::sync::mpsc::channel();
+    let (evaluations, _answers) = std::sync::mpsc::channel();
+    model.occupancy_stale = true;
+    sync_slot_occupancy(&mut model, &home, &sender, &evaluations);
+    assert!(
+        model.left_projects.is_empty(),
+        "the sweep took the project it was handed"
+    );
+    model.note_space_projects(&identities_fixture());
+    assert!(
+        model.left_projects.is_empty(),
+        "and it is handed once, however often the session moves"
     );
 }
 
@@ -351,45 +421,45 @@ fn an_evaluation_is_released_under_the_key_it_reserved() {
     assert!(pending.is_empty());
 }
 
-/// A one-agent session whose only tab runs in `cwd`.
-/// Work is bound to a project and never to a space: an agent's record
-/// carries its base, branch, checkout and target, and nothing about a
-/// space. So a space is matched by its canonical root alone.
+/// A space works in the projects its agents stand in, whatever it is
+/// called: an agent in the project's own tree or in one of its slots.
 #[test]
-fn a_space_is_matched_by_its_root_whatever_it_is_called() {
-    let scratch = uze_testkit::temp::scratch("orchestrator-space-by-root");
+fn a_space_works_where_its_agents_stand() {
+    let scratch = uze_testkit::temp::scratch("orchestrator-space-works-in");
     let project = scratch.join("demo");
-    std::fs::create_dir_all(&project).unwrap();
-    let mut session = session(&project);
-    // The space the work was left in was closed; this is a different
-    // one, opened later on the same directory, under another name.
-    session.workspace.spaces[0].label = "something else entirely".into();
-    let model = model_of(session);
+    uze_testkit::git::mark_repository(&project);
+    let model = agent_session_in(&project.to_string_lossy());
+    let space = model.session.as_ref().unwrap().workspace.spaces[0].id;
 
     assert_eq!(
-        model.space_rooted_at(&project),
-        Some(model.session.as_ref().unwrap().workspace.spaces[0].id),
-        "the name and the identity have no say; the root does"
+        model.space_working_in(&project),
+        Some(space),
+        "the name and the identity have no say; where its agents stand does"
     );
     let _ = std::fs::remove_dir_all(scratch);
 }
 
-/// A space's root is what the sidebar, the badge and the changes
-/// overlay all describe. One rooted at `$HOME` describes no repository,
-/// so seating an isolated agent there would put it back in the wrong
-/// place — and matching by containment would make that space the owner
-/// of every project beneath it.
+/// A shell names no project, wherever it stands, and a space whose agent
+/// works above a project is not working in it: one whose agent is in
+/// `$HOME` would otherwise own every project beneath it.
 #[test]
-fn a_space_rooted_above_the_project_does_not_match_it() {
+fn neither_a_shell_nor_an_agent_above_the_project_makes_the_space_work_in_it() {
     let scratch = uze_testkit::temp::scratch("orchestrator-space-above");
     let project = scratch.join("home").join("demo");
-    std::fs::create_dir_all(&project).unwrap();
-    let model = model_of(session(scratch.join("home")));
+    uze_testkit::git::mark_repository(&project);
 
+    let shells = model_of(session(&project));
     assert_eq!(
-        model.space_rooted_at(&project),
+        shells.space_working_in(&project),
         None,
-        "a space above the project is not the project's space"
+        "a shell names no project"
+    );
+
+    let above = agent_session_in(&scratch.join("home").to_string_lossy());
+    assert_eq!(
+        above.space_working_in(&project),
+        None,
+        "an agent above the project is not working in it"
     );
     let _ = std::fs::remove_dir_all(scratch);
 }
@@ -449,6 +519,7 @@ fn a_placed_agent_is_drawn_isolated_before_any_evaluation_answers() {
         command: vec!["claude".to_owned()],
         placement: Ok(placement),
         replacing: None,
+        space: None,
     });
 
     let (_, task) = driven
@@ -473,6 +544,7 @@ fn an_agent_that_could_not_be_placed_says_why_and_opens_nothing() {
         command: vec!["claude".to_owned()],
         placement: Err("could not place the agent: no commit to branch from".to_owned()),
         replacing: None,
+        space: None,
     });
     let said = format!("{:?}", driven.attach.model.toast_stack());
     assert!(
@@ -563,17 +635,24 @@ fn resume_clicked_on_a_lost_checkout_brings_the_task_back_with_its_commits() {
     // the dead row it replaces is closed — the operator is left with
     // one agent for the task, not a corpse beside a copy.
     let lost_tab = first_tab(&driven.attach.model).id;
+    let its_space = driven
+        .attach
+        .model
+        .session
+        .as_ref()
+        .unwrap()
+        .workspace
+        .spaces[0]
+        .id;
     driven.placements_answered(resolution);
     let sent = driven.sent();
-    assert!(
-        sent.iter()
-            .any(|request| matches!(request, ClientRequest::SelectTab { tab } if *tab == lost_tab)),
-        "the row is selected, so the revived agent opens in its space: {sent:?}"
-    );
     let created = sent
         .iter()
-        .position(|request| matches!(request, ClientRequest::CreateTab { cwd, .. } if cwd.as_deref() == Some(slot.as_path())))
-        .expect("the revived agent opens in the slot");
+        .position(|request| {
+            matches!(request, ClientRequest::CreateTab { cwd, space, .. }
+            if cwd.as_deref() == Some(slot.as_path()) && *space == Some(its_space))
+        })
+        .expect("the revived agent opens in the slot, in the space of the row it replaces");
     let closed = sent
         .iter()
         .position(|request| matches!(request, ClientRequest::CloseTab { tab } if *tab == lost_tab))
@@ -605,11 +684,10 @@ fn resume_clicked_on_a_lost_checkout_brings_the_task_back_with_its_commits() {
 /// agent in that checkout *and* names the task on the launch: a tab
 /// without the stamp is an agent no reader can bind to its work.
 ///
-/// And it opens it in a space rooted at the work's own project. The
-/// client here is looking at a space rooted somewhere else entirely —
-/// which is the ordinary case for a list that crosses projects — so a
-/// space for the project is opened first, and the tab waits for it
-/// rather than landing in the one in front of the operator.
+/// And it never opens a space of its own. The client here is looking at a
+/// space whose agent works somewhere else entirely — the ordinary case for
+/// a list that crosses projects — and no space works in the work's
+/// project, so the agent opens in the space in front.
 #[test]
 fn resuming_a_preserved_task_that_kept_its_checkout_opens_a_stamped_tab() {
     let repository = uze_testkit::git::Repository::new("orchestrator-resume-kept");
@@ -660,42 +738,30 @@ fn resuming_a_preserved_task_that_kept_its_checkout_opens_a_stamped_tab() {
         uze_terminal::launch::AGENT_IDENTITY_VARIABLE.to_owned(),
         task_id,
     );
-    let project = uze_platform::path::canonical(&root).unwrap();
+    let in_front = driven
+        .attach
+        .model
+        .session
+        .as_ref()
+        .unwrap()
+        .workspace
+        .selected_space;
     let sent = driven.sent();
-    assert!(
-        sent.iter().any(|request| matches!(
-            request,
-            ClientRequest::CreateSpace { seat, .. } if seat.root == project
-        )),
-        "no space is open on the work's project, so one is: {sent:?}"
-    );
     assert!(
         !sent
             .iter()
-            .any(|request| matches!(request, ClientRequest::CreateTab { .. })),
-        "and the tab waits for it rather than landing in the space the \
-         operator was looking at: {sent:?}"
+            .any(|request| matches!(request, ClientRequest::CreateSpace { .. })),
+        "no space is opened for it: {sent:?}"
     );
-
-    // The session now has the space, as the runtime would have said.
-    let mut session = session(&project);
-    session.workspace.spaces[0].tabs.clear();
-    driven.attach.model.session = Some(session);
-    driven.attach.land_pending_agent_tab();
-
-    let sent = driven.sent();
     assert!(
         sent.iter().any(|request| matches!(
             request,
-            ClientRequest::CreateTab { cwd, env, .. }
-                if cwd.as_deref() == Some(placement.cwd.as_path()) && env.contains(&identity)
+            ClientRequest::CreateTab { cwd, env, space, .. }
+                if cwd.as_deref() == Some(placement.cwd.as_path())
+                    && env.contains(&identity)
+                    && *space == Some(in_front)
         )),
-        "the agent opens in its checkout, launched for its task: {sent:?}"
-    );
-    assert!(
-        sent.iter()
-            .any(|request| matches!(request, ClientRequest::SelectSpace { .. })),
-        "in the space rooted at its own project: {sent:?}"
+        "the agent opens in its checkout, launched for its task, in the space in front: {sent:?}"
     );
 }
 
@@ -792,6 +858,7 @@ fn a_checkout_whose_stamp_moved_is_evaluated_at_once() {
             .sender
             .send(super::StampResolution {
                 stamps: vec![(checkout.clone(), Some(value))],
+                declaration: None,
             })
             .unwrap();
         driven.attach.absorb_checkout_stamps();

@@ -5,7 +5,7 @@ description: Install uze, set up your agents, and keep it current
 
 <Demo
   cast="/casts/install.cast"
-  posterAt={9.4}
+  posterAt={8.5}
   alt="A shell with no uze: the one-line installer downloads and verifies the release, uze setup claude installs Claude Code, and uze workspace opens the workspace with a first agent."
   caption="One line to install, one to set up an agent, one to open the workspace."
 />
@@ -82,20 +82,17 @@ You can also skip this step. When the workspace opens, it sets up every agent
 already on your machine that is not set up yet, without asking and without
 updating it. It asks which to install only when your machine has none.
 
+```bash
+uze setup list    # what is installed and ready
+```
+
 Some installers put the agent in a directory your current shell does not
 search yet. `uze setup` still verifies it there, tells you where it is, and
 reminds you to open a new shell before running it by name. An agent already
 installed is updated through its own update command instead.
 
 `uze setup` never edits your shell's startup file. The shims it creates are for
-the workspace, which puts them first on `PATH` in its own panes. If an earlier
-uze added a `# >>> uze shims path >>>` block to your `.bashrc`, `.zshrc` or
-`config.fish`, uze no longer manages it: delete it by hand if you want your
-own shells to stop putting the shims first.
-
-```bash
-uze setup list    # what is installed and ready
-```
+the workspace, which puts them first on `PATH` in its own panes.
 
 ## Staying current
 
@@ -117,7 +114,7 @@ checking; in CI it is off unless you set it.
    uze remove <plugin> -m # once per plugin
    ```
 
-2. Stop the workspace in each project where you opened it: `uze workspace stop`.
+2. Stop the workspace and every process in it: `uze workspace stop`.
 3. In each project, delete `agents.yaml`, `agents.lock` and `.worktrees/` if you
    no longer want them, the plugin folders named `<plugin>@<market>` under
    `.agents/rules/`, and their entries in `.agents/rules.json`. uze writes nothing into `AGENTS.md`, so there is nothing to

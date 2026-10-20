@@ -174,6 +174,8 @@ pub(super) struct WorktreesRead {
 
 pub(super) struct WorktreesResolution {
     pub(super) space: SpaceId,
+    /// The project the read was for: a space holds overviews of several.
+    pub(super) root: PathBuf,
     pub(super) asked: u64,
     pub(super) view: Option<CheckoutsView>,
 }
@@ -368,13 +370,6 @@ impl EditField {
     }
 }
 
-/// The overview's count of the space's agents.
-pub(super) struct Activity {
-    pub(super) running: usize,
-    pub(super) ready: usize,
-    pub(super) preserved: usize,
-}
-
 /// One line of the Workspace section, which the keys walk.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum WorkspaceRow {
@@ -414,18 +409,23 @@ pub(super) fn action_moment(state: ActionState) -> &'static str {
 
 pub(super) struct SpaceOverviewResolution {
     pub(super) space: SpaceId,
+    /// The project the read was for: a space holds overviews of several,
+    /// each counting its reads from its own start.
+    pub(super) root: PathBuf,
     pub(super) asked: u64,
     pub(super) answer: std::result::Result<SpaceOverview, String>,
 }
 
 pub(super) struct FactBodyResolution {
     pub(super) space: SpaceId,
+    pub(super) root: PathBuf,
     pub(super) name: String,
     pub(super) body: std::result::Result<String, String>,
 }
 
 pub(super) struct DeclarationSaveResolution {
     pub(super) space: SpaceId,
+    pub(super) root: PathBuf,
     pub(super) sent: SentEdits,
     pub(super) outcome: std::result::Result<DeclarationApplied, String>,
 }
@@ -465,6 +465,7 @@ pub(super) fn overview_answers(action: Action) -> bool {
             | Action::MoveItemUp
             | Action::MoveItemDown
             | Action::DiscardChanges
+            | Action::ReviewCommands
             | Action::NextValue
             | Action::PreviousValue
             | Action::SaveFile
@@ -647,6 +648,13 @@ impl SpaceOverviewView {
             .iter()
             .filter(|checkout| made_for_an_agent(checkout))
             .collect()
+    }
+
+    /// Whether an answer asked for `root` in `space` is this overview's:
+    /// the same space and the same project, since one space holds the
+    /// overviews of every project its agents work in.
+    pub(super) fn answers(&self, space: SpaceId, root: &Path) -> bool {
+        self.space == space && self.root == root
     }
 
     pub(super) fn project(&self) -> Option<&ProjectSpace> {
@@ -1223,29 +1231,26 @@ fn listed_branch(key: DeclarationKey, view: &SpaceOverviewView) -> bool {
 }
 
 impl WorkspaceModel {
-    /// Opens `space`'s overview in front of `behind`, or keeps the one
-    /// already open for it. `settled` says the server already has that
-    /// tab in front.
-    pub(super) fn open_space_overview(&mut self, space: SpaceId, behind: TabId, settled: bool) {
+    /// Opens the overview of the project `root` an agent of `space` works
+    /// in, in front of `behind`, or keeps the one already open for it.
+    /// `settled` says the server already has that tab in front.
+    pub(super) fn open_space_overview(
+        &mut self,
+        space: SpaceId,
+        behind: TabId,
+        root: PathBuf,
+        settled: bool,
+    ) {
         if let Some(overview) = self
             .space_overview
             .as_mut()
-            .filter(|overview| overview.space == space)
+            .filter(|overview| overview.space == space && overview.root == root)
         {
             overview.behind = behind;
             overview.settled = settled;
             return;
         }
-        let Some(root) = self.session.as_ref().and_then(|session| {
-            session
-                .workspace
-                .spaces
-                .iter()
-                .find(|candidate| candidate.id == space)
-                .map(|space| space.root.clone())
-        }) else {
-            return;
-        };
+        self.put_away_space_overview();
         self.close_extension();
         let overview = match self.put_away_overviews.remove(&space) {
             // Its answer is read again on opening; what was drawn from the
@@ -1264,10 +1269,13 @@ impl WorkspaceModel {
         self.dirty = true;
     }
 
-    /// Puts the overview away once the selection moved on from the tab it
-    /// stands in front of — a tab opened, an agent placed, another space —
-    /// however that came about.
-    pub(super) fn put_away_space_overview_left_behind(&mut self) {
+    /// Follows the agent the overview is about as the selection moves,
+    /// however that came about: a shell beside the same agent keeps it,
+    /// another agent turns it to that agent (see
+    /// [`WorkspaceModel::overview_follows`]), and anything that is no
+    /// agent's context — the space's own row, its shell, a space of
+    /// shells — puts it away.
+    pub(super) fn put_away_space_overview_left_behind(&mut self, identities: &[AgentIdentity]) {
         let Some(overview) = self.space_overview.as_mut() else {
             return;
         };
@@ -1275,10 +1283,22 @@ impl WorkspaceModel {
             return;
         };
         let space = session.selected_space();
-        let in_front = space.id == overview.space && space.selected_tab == overview.behind;
-        if in_front {
+        if space.id == overview.space && space.selected_tab == overview.behind {
             overview.settled = true;
-        } else if overview.settled || session.space(overview.space).is_none() {
+            return;
+        }
+        // Opened ahead of the broadcast that puts its tab in front: what
+        // the server still says is the selection before the one asked for.
+        if !overview.settled && session.space(overview.space).is_some() {
+            return;
+        }
+        let in_front = space_context_agent(space, identities);
+        if in_front.is_some() && in_front == overview.agent.as_ref().map(|agent| agent.tab) {
+            overview.space = space.id;
+            overview.behind = space.selected_tab;
+        } else if in_front.is_some() {
+            self.overview_follows = true;
+        } else {
             self.put_away_space_overview();
         }
     }
@@ -1292,46 +1312,6 @@ impl WorkspaceModel {
         };
         self.put_away_overviews
             .retain(|space, _| session.space(*space).is_some());
-    }
-
-    /// How many of the space's agents are at work, ready to deliver, and
-    /// kept with no pane: from what the client holds live — its tabs and
-    /// its last evaluation — so the figures move with the sidebar rather
-    /// than with the overview's own read.
-    pub(super) fn overview_activity(
-        &self,
-        overview: &SpaceOverviewView,
-        project: &ProjectSpace,
-    ) -> Activity {
-        let live: BTreeSet<&str> = self.tabs().filter_map(launched_agent_id).collect();
-        let running = self
-            .session
-            .as_ref()
-            .and_then(|session| session.space(overview.space))
-            .map_or(0, |space| {
-                space
-                    .tabs
-                    .iter()
-                    .filter(|tab| launched_agent_id(tab).is_some())
-                    .count()
-            });
-        let primary = evaluation_key(&project.status.report.root);
-        let ready = self.remembered.tasks.get(&primary).map_or(0, |tasks| {
-            tasks
-                .iter()
-                .filter(|task| matches!(task.state, uze_application::WorkStateView::Ready))
-                .count()
-        });
-        let preserved = project
-            .preserved
-            .iter()
-            .filter(|work| !live.contains(work.id.as_str()))
-            .count();
-        Activity {
-            running,
-            ready,
-            preserved,
-        }
     }
 
     /// The space's worktrees as cards: each with where its work stands and
@@ -1443,7 +1423,7 @@ impl WorkspaceModel {
         let Some(overview) = self
             .space_overview
             .as_mut()
-            .filter(|overview| overview.space == resolution.space)
+            .filter(|overview| overview.answers(resolution.space, &resolution.root))
         else {
             return false;
         };
@@ -1476,7 +1456,7 @@ impl WorkspaceModel {
         let Some(overview) = self
             .space_overview
             .as_mut()
-            .filter(|overview| overview.space == resolution.space)
+            .filter(|overview| overview.answers(resolution.space, &resolution.root))
         else {
             return false;
         };
@@ -1519,7 +1499,7 @@ impl WorkspaceModel {
         let Some(overview) = self
             .space_overview
             .as_mut()
-            .filter(|overview| overview.space == resolution.space)
+            .filter(|overview| overview.answers(resolution.space, &resolution.root))
         else {
             return false;
         };
@@ -1544,10 +1524,13 @@ impl WorkspaceModel {
         let open = self
             .space_overview
             .as_mut()
-            .filter(|overview| overview.space == resolution.space);
+            .filter(|overview| overview.answers(resolution.space, &resolution.root));
         let overview = match open {
             Some(overview) => overview,
-            None => self.put_away_overviews.get_mut(&resolution.space)?,
+            None => self
+                .put_away_overviews
+                .get_mut(&resolution.space)
+                .filter(|overview| overview.root == resolution.root)?,
         };
         self.dirty = true;
         let edit = &mut overview.edit;
@@ -1589,51 +1572,62 @@ impl WorkspaceModel {
 }
 
 impl Attach<'_> {
-    /// The space button: the overview of the space in front, over the tab
+    /// The agent button: the overview of the agent in front, over the tab
     /// in front, or put away when it is already up.
     pub(super) fn toggle_space_overview(&mut self) {
         if self.model.space_overview.is_some() {
             self.model.put_away_space_overview();
             return;
         }
-        let Some((space, behind)) = self.model.session.as_ref().map(|session| {
+        self.open_agent_overview();
+    }
+
+    /// Opens the overview on the agent whose context is in front — nothing
+    /// with none: an overview is an agent's — reading the project it works
+    /// in, what reaches it and the prompts it was given.
+    pub(super) fn open_agent_overview(&mut self) {
+        let Some(agent) = agent_panel_in_front(&self.model, &self.identities) else {
+            self.model.put_away_space_overview();
+            return;
+        };
+        let Some((space, behind, root)) = self.model.session.as_ref().and_then(|session| {
             let space = session.selected_space();
-            (space.id, space.selected_tab)
+            let directory = named_checkout(&self.model.tab(agent.tab)?.pane.cwd);
+            // The checkout the agent works in: what its Settings read and
+            // write, so a change made in an isolated checkout is that
+            // checkout's work, committed and delivered with it.
+            let root = uze_application::isolated_checkout_root(&directory)
+                .or_else(|| self.model.projects.get(&directory).cloned())?;
+            Some((space.id, space.selected_tab, root))
         }) else {
             return;
         };
-        self.model.open_space_overview(space, behind, true);
-        // The agent in front is the overview's first section. Opening
-        // re-reads what reaches it and what it was asked: `AGENTS.md` and
-        // `.agents/` change under an open workspace, and this is the moment
-        // somebody is looking.
-        let agent = space_prompts_panel(&self.model, &self.identities);
-        if let Some(agent) = &agent {
-            let remembered = &mut self.model.remembered;
-            if let Some(key) = &agent.key
-                && remembered.agent_support_pending.as_ref() != Some(key)
-            {
-                remembered.agent_support_pending = Some(key.clone());
-                spawn_support_refresh(self.home, key.clone(), self.channels.support.sender.clone());
-            }
-            if remembered.prompt_history_pending.as_ref() != Some(&agent.space_root) {
-                remembered.prompt_history_pending = Some(agent.space_root.clone());
-                spawn_prompt_history(
-                    self.home,
-                    agent.space_root.clone(),
-                    self.channels.prompts.sender.clone(),
-                );
-            }
+        self.model.open_space_overview(space, behind, root, true);
+        // The agent is the overview's first section. Opening re-reads what
+        // reaches it and what it was asked: `AGENTS.md` and `.agents/`
+        // change under an open workspace, and this is the moment somebody
+        // is looking.
+        let remembered = &mut self.model.remembered;
+        if let Some(key) = &agent.key
+            && remembered.agent_support_pending.as_ref() != Some(key)
+        {
+            remembered.agent_support_pending = Some(key.clone());
+            spawn_support_refresh(self.home, key.clone(), self.channels.support.sender.clone());
+        }
+        if let Some(of) = &agent.prompts
+            && remembered.prompt_history_pending.as_ref() != Some(of)
+        {
+            remembered.prompt_history_pending = Some(of.clone());
+            spawn_prompt_history(self.home, of.clone(), self.channels.prompts.sender.clone());
         }
         if let Some(overview) = self.model.space_overview.as_mut() {
-            // The prompt it was on stays chosen when the space is the same.
+            // The prompt it was on stays chosen when the agent is the same.
             let selected = overview
                 .agent
                 .as_ref()
-                .zip(agent.as_ref())
-                .filter(|(kept, now)| kept.space_root == now.space_root)
-                .map(|(kept, _)| kept.selected);
-            overview.agent = agent;
+                .filter(|kept| kept.prompts == agent.prompts)
+                .map(|kept| kept.selected);
+            overview.agent = Some(agent);
             if let (Some(agent), Some(selected)) = (overview.agent.as_mut(), selected) {
                 agent.selected = selected;
             }
@@ -1757,7 +1751,9 @@ impl Attach<'_> {
             return;
         };
         self.model.dirty = true;
-        if overview.edit.text.is_some() {
+        if action == Action::ReviewCommands {
+            self.review_overview_commands();
+        } else if overview.edit.text.is_some() {
             self.instruction_action(action);
         } else if overview.filtering {
             self.memory_search_action(action);
@@ -2375,7 +2371,13 @@ mod tests {
     #[test]
     fn a_closed_space_takes_its_put_away_overview_with_it() {
         let root = PathBuf::from("/project");
-        let session = Session::new(SpaceSeat { root: root.clone() }, 80, 24);
+        let session = Session::new(
+            SpaceSeat {
+                project: root.clone(),
+            },
+            80,
+            24,
+        );
         let open = session.selected_space().id;
         let closed = SpaceId(open.0 + 1);
         let mut model = WorkspaceModel::default();

@@ -137,11 +137,11 @@ fn render_overview_frame(
     if inner.width < MIN_WIDTH || inner.height < MIN_HEIGHT {
         return;
     }
-    let name = model
-        .session
+    let name = overview
+        .agent
         .as_ref()
-        .and_then(|session| session.space(overview.space))
-        .map_or_else(String::new, |space| space.label.clone());
+        .and_then(|agent| model.tab(agent.tab))
+        .map_or_else(String::new, |tab| tab.label.clone());
     let foot = Rect::new(inner.x, inner.bottom() - 1, inner.width, 1);
     let project = match &overview.answer {
         Some(Ok(SpaceOverview::Project(project))) => Some(project.as_ref()),
@@ -149,19 +149,18 @@ fn render_overview_frame(
     };
     render_header(
         frame,
-        model,
         Rect::new(inner.x, inner.y + HEADER_ROW, inner.width, 1),
         &name,
         overview,
-        project,
     );
     let message = match &overview.answer {
-        Some(Ok(SpaceOverview::RootGone { root })) => {
-            Some(format!("{} no longer exists", display_path(root)))
+        Some(Ok(SpaceOverview::DirectoryGone { directory })) => {
+            Some(format!("{} no longer exists", display_path(directory)))
         }
-        Some(Ok(SpaceOverview::NotAProject { root })) => {
-            Some(format!("{} is not inside a project", display_path(root)))
-        }
+        Some(Ok(SpaceOverview::NotAProject { directory })) => Some(format!(
+            "{} is not inside a project",
+            display_path(directory)
+        )),
         Some(Err(reason)) => Some(reason.clone()),
         _ => None,
     };
@@ -171,6 +170,11 @@ fn render_overview_frame(
             Paragraph::new(line),
             Rect::new(inner.x, inner.y + BAR_ROW, inner.width, 1),
         );
+        // The agent is still the agent, wherever it stands: its prompts
+        // are listed even with no project to describe around them.
+        let top = inner.y + CAUSE_ROW;
+        let body = Rect::new(inner.x, top, inner.width, foot.y.saturating_sub(top + 1));
+        render_agent(frame, body, model, overview, hits, Track::default());
         render_foot(
             frame,
             foot,
@@ -343,64 +347,32 @@ fn section_tabs(model: &WorkspaceModel, overview: &SpaceOverviewView) -> Vec<(Ta
         .collect()
 }
 
+/// Whose overview this is: the agent, by its name, and where it works.
+/// Nothing about other agents — what the space holds is the sidebar's.
 fn render_header(
     frame: &mut ratatui::Frame<'_>,
-    model: &WorkspaceModel,
     rect: Rect,
     name: &str,
     overview: &SpaceOverviewView,
-    project: Option<&ProjectSpace>,
 ) {
     // What this is, since the strip's door to it no longer says so.
-    let left = Line::from(vec![
-        Span::styled("Space  ", theme::fg(Token::TextDim)),
+    let path = overview
+        .agent
+        .as_ref()
+        .map_or_else(|| display_path(&overview.root), |agent| agent.path.clone());
+    let line = Line::from(vec![
+        Span::styled("Agent  ", theme::fg(Token::TextDim)),
         Span::styled(name.to_owned(), theme::fg_bold(Token::TextBright)),
-        Span::styled(
-            format!("  {}", display_path(&overview.root)),
-            theme::fg(Token::TextMuted),
-        ),
+        Span::styled(format!("  {path}"), theme::fg(Token::TextMuted)),
     ]);
-    let left_width = left.width() as u16;
-    frame.render_widget(Paragraph::new(left), rect);
-    let Some(project) = project else {
-        return;
-    };
-    let Activity {
-        running,
-        ready,
-        preserved,
-    } = model.overview_activity(overview, project);
-    let figure = |value: usize, token: Token| {
-        Span::styled(
-            value.to_string(),
-            theme::fg_bold(if value == 0 { Token::TextDim } else { token }),
-        )
-    };
-    let separator = || Span::styled("  ·  ", theme::fg(Token::TextFaint));
-    let activity = Line::from(vec![
-        figure(running, Token::TextBright),
-        Span::styled(" running", theme::fg(Token::TextMuted)),
-        separator(),
-        figure(ready, Token::StateLanded),
-        Span::styled(" ready", theme::fg(Token::TextMuted)),
-        separator(),
-        figure(preserved, Token::TextSecondary),
-        Span::styled(" preserved", theme::fg(Token::TextMuted)),
-    ]);
-    let width = activity.width() as u16;
-    if left_width + width + 4 <= rect.width {
-        frame.render_widget(
-            Paragraph::new(activity),
-            Rect::new(rect.right() - width, rect.y, width, 1),
-        );
-    }
+    frame.render_widget(Paragraph::new(line), rect);
 }
 
 /// The first line of the section: what its state comes from.
 fn cause_line(overview: &SpaceOverviewView, project: &ProjectSpace) -> (String, Token) {
     match overview.section {
         Section::Agent => (
-            "prompts asked in this space, newest first".to_owned(),
+            "prompts this agent was given, newest first".to_owned(),
             Token::TextSecondary,
         ),
         Section::Plugins => {
@@ -464,6 +436,17 @@ fn cause_line(overview: &SpaceOverviewView, project: &ProjectSpace) -> (String, 
                 .is_some_and(|declaration| declaration.editable.is_err())
             {
                 ("read-only".to_owned(), Token::TextSecondary)
+            } else if overview
+                .declaration()
+                .is_some_and(|declaration| !declaration.in_force)
+            {
+                // An isolated checkout's file is its agent's work: new
+                // agents are placed by the primary's until it is delivered.
+                (
+                    "this worktree's agents.yaml · new agents follow the project's until it is delivered"
+                        .to_owned(),
+                    Token::StateInfo,
+                )
             } else if overview
                 .declaration()
                 .is_some_and(|declaration| !declaration.exists)
@@ -570,7 +553,7 @@ fn nothing_to_list(
                 .drawer_prompts
                 .as_ref()
                 .is_some_and(|history| {
-                    history.root == agent.space_root && history.entries.is_empty()
+                    agent.prompts.as_ref() == Some(&history.of) && history.entries.is_empty()
                 })
         }),
         Section::Plugins => {
@@ -1438,7 +1421,9 @@ impl Form {
     }
 }
 
-/// What `uze status` says about the project's commands, by their line.
+/// Which of the commands the form shows the project's approval leaves
+/// waiting, by their line: judged on the file the form edits, so a line
+/// added in an isolated checkout reads as waiting there too.
 struct CommandStates<'a> {
     awaiting: Vec<&'a str>,
 }
@@ -1447,12 +1432,10 @@ impl<'a> CommandStates<'a> {
     fn of(project: &'a ProjectSpace) -> Self {
         Self {
             awaiting: project
-                .status
-                .commands_awaiting_approval
-                .iter()
-                .flat_map(|awaiting| &awaiting.commands)
-                .map(|command| command.line.as_str())
-                .collect(),
+                .workspace
+                .as_ref()
+                .map(|declaration| declaration.awaiting.iter().map(String::as_str).collect())
+                .unwrap_or_default(),
         }
     }
 
@@ -1787,9 +1770,9 @@ fn render_picker(
     area
 }
 
-/// The Agent section: whose prompts are listed, and the prompts the agent
-/// — or its space — was given, one row each, newest first, under the age
-/// they fall in. What reaches the agent is the drawer's.
+/// The Agent section: the prompts the agent was given, one row each,
+/// newest first, under the age they fall in. What reaches the agent is the
+/// drawer's.
 fn render_agent(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
@@ -1806,7 +1789,7 @@ fn render_agent(
         .remembered
         .drawer_prompts
         .as_ref()
-        .filter(|history| history.root == agent.space_root)
+        .filter(|history| agent.prompts.as_ref() == Some(&history.of))
     else {
         return draw_lines(
             frame,
@@ -1822,13 +1805,9 @@ fn render_agent(
             frame,
             list,
             "No prompts yet",
-            Some("What this space's agents are asked is listed here, newest first."),
+            Some("What this agent is asked is listed here, newest first."),
         );
     }
-    let live: std::collections::HashMap<&str, &str> = model
-        .tabs()
-        .filter_map(|tab| super::launched_agent_id(tab).map(|id| (id, tab.label.as_str())))
-        .collect();
     let clock = uze_application::PromptClock::now();
     // What the table has across once, with no drawer beside the list, the
     // scrollbar's groove is taken; the prompt has what the others leave.
@@ -1851,12 +1830,6 @@ fn render_agent(
             }
             age = Some(this_age);
         }
-        let tab = entry
-            .agent
-            .as_deref()
-            .and_then(|id| live.get(id).copied())
-            .unwrap_or(&entry.tab_label);
-        let place = format!("{}/{tab}", entry.space_label);
         let when = entry.compact_age(&clock);
         let mut spans = table.row(vec![
             cell(&entry.agent_binary, PROMPTS[0].width, Token::TextSecondary),
@@ -1867,7 +1840,6 @@ fn render_agent(
                 ),
                 theme::fg(Token::TextMuted),
             ),
-            cell(&place, PROMPTS[2].width, Token::TextMuted),
             Span::raw(""),
         ]);
         // The prompt's own cell is drawn below, sliding or cut.
@@ -2223,9 +2195,9 @@ const DRAWER_LABEL: u16 = 16;
 /// beneath its label.
 const DRAWER_VALUE_LEAST: usize = 12;
 
-/// The prompts table: who answered, how long ago, where, and the prompt,
-/// which is what the table is read for.
-const PROMPTS: [Column; 4] = [
+/// The prompts table: who answered, how long ago, and the prompt, which is
+/// what the table is read for.
+const PROMPTS: [Column; 3] = [
     Column {
         heading: "harness",
         width: 12,
@@ -2235,11 +2207,6 @@ const PROMPTS: [Column; 4] = [
         heading: "when",
         width: 7,
         keep: 3,
-    },
-    Column {
-        heading: "where",
-        width: 24,
-        keep: 1,
     },
     Column {
         heading: "prompt",
@@ -2897,6 +2864,11 @@ fn foot_keys(
             ]);
             if overview.edit.is_refused() {
                 keys.push((Action::DiscardChanges, "discard"));
+            } else if overview
+                .project()
+                .is_some_and(|project| project.status.commands_awaiting_approval.is_some())
+            {
+                keys.push((Action::ReviewCommands, "review"));
             }
             match overview.selected_workspace_row() {
                 Some(WorkspaceRow::Key(key)) if is_number(key) => {

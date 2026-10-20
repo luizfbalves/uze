@@ -1064,6 +1064,17 @@ fn agent_options(home: &UzeHome) -> Vec<AgentOption> {
 /// `comm` — see `uze_terminal::PaneRuntime::foreground_status`). Returns
 /// the harness's short binary/alias name (`claude`, `codex`, …) — what
 /// decides whether a tab lists under "agents" or "shell" at all.
+impl WorkspaceModel {
+    /// What the agent in the selected tab is asked to call a Skill with;
+    /// a slash, the commonest, where the tab runs no agent it recognizes.
+    pub(super) fn focused_agent_skill_sigil(&self, identities: &[AgentIdentity]) -> &'static str {
+        self.session
+            .as_ref()
+            .and_then(|session| agent_for_tab(identities, session.selected_tab()))
+            .map_or("/", |identity| identity.skill_sigil)
+    }
+}
+
 fn agent_identity_for_tab<'a>(identities: &'a [AgentIdentity], tab: &Tab) -> Option<&'a str> {
     agent_for_tab(identities, tab).map(|identity| identity.binary)
 }

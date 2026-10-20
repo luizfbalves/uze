@@ -635,7 +635,9 @@ fn bullets(text: &str, heading: &str) -> Vec<String> {
 }
 
 /// The milestone at a glance, as a document the surface renders.
-pub fn overview(milestone: &Milestone) -> String {
+/// The milestone as a document the surface renders, laid out for `width`
+/// columns.
+pub fn overview(milestone: &Milestone, width: usize) -> String {
     let mut text = format!("# {}", milestone.version);
     if !milestone.name.is_empty() {
         text.push_str(&format!(" · {}", milestone.name));
@@ -652,6 +654,7 @@ pub fn overview(milestone: &Milestone) -> String {
     if let Some(stopped_at) = &milestone.stopped_at {
         text.push_str(&format!("\nStopped at: {stopped_at}\n"));
     }
+    text.push_str("\n---\n");
     if !milestone.phases.is_empty() {
         text.push_str("\n## Phases\n\n| Phase | Name | Plans | State |\n|--:|---|:-:|---|\n");
         for (at, phase) in milestone.phases.iter().enumerate() {
@@ -677,7 +680,7 @@ pub fn overview(milestone: &Milestone) -> String {
         && !phase.plans.is_empty()
     {
         text.push_str(&format!("\n## Phase {} · {}\n", phase.number, phase.name));
-        push_plans(&mut text, phase);
+        push_plans(&mut text, phase, width);
     }
     if !milestone.blockers.is_empty() {
         text.push_str("\n## Blockers\n\n");
@@ -697,9 +700,10 @@ pub fn overview(milestone: &Milestone) -> String {
     text
 }
 
-/// One phase in full, as a document the surface renders: where it stands
-/// and what runs next first, then its goal, criteria and plans.
-pub fn detail(phase: &Phase) -> String {
+/// One phase in full, as a document the surface renders for `width`
+/// columns: where it stands and what runs next first, then its goal,
+/// criteria and plans, each set apart.
+pub fn detail(phase: &Phase, width: usize) -> String {
     let mut text = format!("# Phase {} · {}\n", phase.number, phase.name);
     let mut line = vec![format!("**{}**", standing(phase, false))];
     if !phase.plans.is_empty() {
@@ -712,19 +716,22 @@ pub fn detail(phase: &Phase) -> String {
     if !phase.done {
         line.push(format!("next `{}`", phase.next.words()));
     }
-    text.push_str(&format!("\n{}\n", line.join(" · ")));
+    text.push_str(&format!("\n{}\n\n---\n", line.join(" · ")));
     if !phase.goal.is_empty() {
-        text.push_str(&format!("\n**Goal:** {}\n", phase.goal));
+        text.push_str(&format!("\n## Goal\n\n{}\n", phase.goal));
     }
     if !phase.criteria.is_empty() {
-        text.push_str("\n## Success criteria\n\n");
+        text.push_str("\n## Success criteria\n");
+        // A paragraph each rather than a list: a criterion runs to several
+        // lines, and the blank line between them is what tells one from the
+        // next. A loose list would put the number on a line of its own.
         for (at, criterion) in phase.criteria.iter().enumerate() {
-            text.push_str(&format!("{}. {criterion}\n", at + 1));
+            text.push_str(&format!("\n**{}.** {criterion}\n", at + 1));
         }
     }
     if !phase.plans.is_empty() {
-        text.push_str("\n## Plans\n");
-        push_plans(&mut text, phase);
+        text.push_str("\n---\n\n## Plans\n");
+        push_plans(&mut text, phase, width);
     }
     if !phase.documents.is_empty() {
         text.push_str("\n## Documents\n\n");
@@ -737,38 +744,68 @@ pub fn detail(phase: &Phase) -> String {
 
 /// A phase's plans as one table, a row each: the wave named on its first
 /// plan only, a plan by the first sentence of what it delivered (or, not
-/// run yet, of what it sets out to do), and its mark.
-fn push_plans(text: &mut String, phase: &Phase) {
-    text.push_str("\n| Wave | Plan | Objective | Status |\n|:-:|:-:|---|---|\n");
+/// run yet, of what it sets out to do), and its mark. The sentence is cut
+/// to the room `width` leaves once the other columns are drawn, so the
+/// table spans the surface and no row folds.
+fn push_plans(text: &mut String, phase: &Phase, width: usize) {
     let mut wave = None;
-    for plan in &phase.plans {
-        let wave_cell = if wave == Some(plan.wave) {
-            String::new()
-        } else {
-            wave = Some(plan.wave);
-            plan.wave.to_string()
-        };
-        let said = if plan.mark == Mark::Done && !plan.summary.is_empty() {
-            &plan.summary
-        } else {
-            &plan.objective
-        };
-        let mut status = match plan.mark {
-            Mark::Done => "done",
-            Mark::Current => "**current**",
-            Mark::Pending => "pending",
+    let rows: Vec<(String, &Plan, &str, String)> = phase
+        .plans
+        .iter()
+        .map(|plan| {
+            let wave_cell = if wave == Some(plan.wave) {
+                String::new()
+            } else {
+                wave = Some(plan.wave);
+                plan.wave.to_string()
+            };
+            let said = if plan.mark == Mark::Done && !plan.summary.is_empty() {
+                plan.summary.as_str()
+            } else {
+                plan.objective.as_str()
+            };
+            let mut status = match plan.mark {
+                Mark::Done => "done",
+                Mark::Current => "current",
+                Mark::Pending => "pending",
+            }
+            .to_owned();
+            if plan.checkpoint && plan.mark != Mark::Done {
+                status.push_str(" · stops for you");
+            }
+            (wave_cell, plan, said, status)
+        })
+        .collect();
+    let column = |header: &str, cells: &mut dyn Iterator<Item = usize>| {
+        cells.chain([header.chars().count()]).max().unwrap_or(0)
+    };
+    let wave_width = column("Wave", &mut rows.iter().map(|row| row.0.chars().count()));
+    let plan_width = column("Plan", &mut rows.iter().map(|row| row.1.id.chars().count()));
+    let status_width = column("Status", &mut rows.iter().map(|row| row.3.chars().count()));
+    // The markdown table's own borders: `│ ` before each cell, ` │` after
+    // the last and ` ` between, for four columns.
+    const BORDERS: usize = 3 * 4 + 1;
+    let room = width
+        .saturating_sub(BORDERS + wave_width + plan_width + status_width)
+        .max(MIN_OBJECTIVE);
+    text.push_str("\n| Wave | Plan | Objective | Status |\n|:-:|:-:|---|---|\n");
+    for (wave_cell, plan, said, status) in rows {
+        let status = match plan.mark {
+            Mark::Current => status.replacen("current", "**current**", 1),
+            _ => status,
         }
-        .to_owned();
-        if plan.checkpoint && plan.mark != Mark::Done {
-            status.push_str(" · *stops for you*");
-        }
+        .replacen("stops for you", "*stops for you*", 1);
         text.push_str(&format!(
             "| {wave_cell} | {} | {} | {status} |\n",
             plan.id,
-            cell(&headline(said))
+            cell(&headline(said, room))
         ));
     }
 }
+
+/// The narrowest an objective is cut to, however little room is left: a
+/// few words still say which plan it is.
+const MIN_OBJECTIVE: usize = 16;
 
 /// Where a phase stands, in a word or two.
 fn standing(phase: &Phase, current: bool) -> &'static str {
@@ -791,15 +828,15 @@ fn plans_done_of_all(phase: &Phase) -> String {
     }
 }
 
-/// A plan's text cut to its first sentence, and that to one table line:
-/// GSD's objectives and summaries run to a paragraph, and a table of them
-/// folds every row into several.
-fn headline(text: &str) -> String {
-    const WIDTH: usize = 60;
+/// A plan's text cut to its first sentence, and that to `width`
+/// columns: GSD's objectives and summaries run to a paragraph, and a table
+/// of them folds every row into several. A colon introduces what follows
+/// (`WR-06: the ledger…`) rather than ending the sentence.
+fn headline(text: &str, width: usize) -> String {
     let sentence = text
         .char_indices()
         .find(|&(at, c)| {
-            matches!(c, '.' | ';' | ':')
+            matches!(c, '.' | ';')
                 && text[at + c.len_utf8()..]
                     .chars()
                     .next()
@@ -807,11 +844,19 @@ fn headline(text: &str) -> String {
         })
         .map_or(text, |(at, c)| &text[..at + c.len_utf8()])
         .trim();
-    if sentence.chars().count() <= WIDTH {
+    if sentence.chars().count() <= width {
         return sentence.to_owned();
     }
-    let cut: String = sentence.chars().take(WIDTH).collect();
-    let cut = cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head);
+    // One column is the ellipsis'. A cut that lands on a word's end keeps
+    // the word; one inside a word goes back to the space before it.
+    let keep = width.saturating_sub(1);
+    let cut: String = sentence.chars().take(keep).collect();
+    let on_a_space = sentence.chars().nth(keep).is_some_and(char::is_whitespace);
+    let cut = if on_a_space {
+        cut.as_str()
+    } else {
+        cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head)
+    };
     format!("{}…", cut.trim_end_matches([',', ';', ':', ' ']))
 }
 
@@ -1095,8 +1140,11 @@ mod tests {
     fn the_overview_tabulates_the_phases_and_the_current_plans() {
         let dir = project("gsd-documents");
         let milestone = read(&DiskHost, dir.path()).unwrap();
-        let overview = overview(&milestone);
-        assert!(overview.starts_with("# v1.9 · Sync\n\n**executing** · 50% · 2 of 4 plans\n"));
+        let overview = overview(&milestone, WIDE);
+        assert!(overview.starts_with(
+            "# v1.9 · Sync\n\n**executing** · 50% · 2 of 4 plans\n\n\
+             Stopped at: Completed 03-01-PLAN.md\n\n---\n"
+        ));
         assert!(overview.contains(
             "| Phase | Name | Plans | State |\n|--:|---|:-:|---|\n\
              | 2 | Import | 1/1 | done |\n\
@@ -1114,39 +1162,84 @@ mod tests {
         assert!(overview.ends_with("## Next\n\n`gsd-execute-phase 3`\n"));
     }
 
+    /// Wide enough that no plan in the fixture is cut.
+    const WIDE: usize = 200;
+
     #[test]
     fn a_phase_says_where_it_stands_above_its_plans() {
         let dir = project("gsd-detail");
         let milestone = read(&DiskHost, dir.path()).unwrap();
-        let detail = detail(&milestone.phases[1]);
+        let detail = detail(&milestone.phases[1], WIDE);
         assert!(detail.starts_with(
             "# Phase 3 · Sync Engine\n\n\
-             **in progress** · 1 of 3 plans · next `gsd-execute-phase 3`\n"
+             **in progress** · 1 of 3 plans · next `gsd-execute-phase 3`\n\n---\n"
         ));
-        assert!(detail.contains("1. A save made offline syncs"));
+        assert!(
+            detail.contains("\n## Goal\n\nOffline saves reach the server\n"),
+            "the goal under a heading of its own"
+        );
+        assert!(
+            detail.contains("**1.** A save made offline syncs\n\n**2.** Conflicts keep both\n"),
+            "a blank line between criteria"
+        );
+        assert!(detail.contains("\n---\n\n## Plans\n"));
         assert!(detail.contains("| 1 | 01 | Every write is logged | done |"));
         assert!(!detail.contains("## Next"), "the next step heads the phase");
         assert!(
-            super::detail(&milestone.phases[2])
+            super::detail(&milestone.phases[2], WIDE)
                 .starts_with("# Phase 4 · Sharing\n\n**not started** · next `gsd-plan-phase 4`\n")
         );
         assert!(
-            super::detail(&milestone.phases[0])
+            super::detail(&milestone.phases[0], WIDE)
                 .starts_with("# Phase 2 · Import\n\n**done** · 1 of 1 plans\n")
         );
     }
 
     #[test]
-    fn a_plan_is_named_by_its_first_sentence() {
-        assert_eq!(headline("Change log"), "Change log");
-        assert_eq!(
-            headline("Pedido vira CONVERTED na hora. A exportação LGPD lista as sacolas."),
-            "Pedido vira CONVERTED na hora."
+    fn a_plan_takes_the_room_the_table_leaves_it() {
+        let dir = project("gsd-room");
+        let mut milestone = read(&DiskHost, dir.path()).unwrap();
+        let phase = &mut milestone.phases[1];
+        phase.plans[1].objective =
+            "Conflicting saves keep both versions and ask the owner which one stays".to_owned();
+        // 80 columns, less the table's 13 of borders and the Wave (4), Plan
+        // (4) and Status (23, `current · stops for you`) columns: 36.
+        let detail = detail(phase, 80);
+        assert!(
+            detail.contains("| 2 | 02 | Conflicting saves keep both… | **current** |"),
+            "{detail}"
         );
-        assert_eq!(headline("R$ 123.456,78 em 32px"), "R$ 123.456,78 em 32px");
+        assert!(
+            super::detail(phase, usize::MAX).contains(
+                "| 2 | 02 | Conflicting saves keep both versions and ask the owner which one stays |"
+            ),
+            "no width to fit means nothing is cut"
+        );
+    }
+
+    #[test]
+    fn a_plan_is_named_by_its_first_sentence() {
+        assert_eq!(headline("Change log", 60), "Change log");
         assert_eq!(
             headline(
-                "GET /public/:storeSlug/cart-restore/:token devolve a sacola revalidada pelo cardápio de hoje"
+                "Pedido vira CONVERTED na hora. A exportação LGPD lista as sacolas.",
+                60
+            ),
+            "Pedido vira CONVERTED na hora."
+        );
+        assert_eq!(
+            headline("R$ 123.456,78 em 32px", 60),
+            "R$ 123.456,78 em 32px"
+        );
+        assert_eq!(
+            headline("WR-06/SC4: o ledger grava o custo. Depois o resto.", 60),
+            "WR-06/SC4: o ledger grava o custo.",
+            "a colon introduces the sentence rather than ending it"
+        );
+        assert_eq!(
+            headline(
+                "GET /public/:storeSlug/cart-restore/:token devolve a sacola revalidada pelo cardápio de hoje",
+                60
             ),
             "GET /public/:storeSlug/cart-restore/:token devolve a sacola…"
         );

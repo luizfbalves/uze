@@ -820,19 +820,20 @@ impl SpecView {
     }
 
     /// The milestone document on show: the overview, or one phase.
-    fn milestone_document(&self) -> Option<String> {
+    fn milestone_document(&self, width: usize) -> Option<String> {
         let milestone = self.milestone()?;
         Some(match self.stage {
-            Stage::Phase(at) => milestone::detail(milestone.phases.get(at)?),
-            Stage::Overview | Stage::Gap => milestone::overview(milestone),
+            Stage::Phase(at) => milestone::detail(milestone.phases.get(at)?, width),
+            Stage::Overview | Stage::Gap => milestone::overview(milestone, width),
         })
     }
 
     fn lay_out(&self, width: Option<usize>) {
         if self.subject == Subject::Milestone {
+            let columns = width.unwrap_or(usize::MAX);
             let lines = self
-                .milestone_document()
-                .map(|text| markdown::render(&text, &self.theme, width.unwrap_or(usize::MAX)))
+                .milestone_document(columns)
+                .map(|text| markdown::render(&text, &self.theme, columns))
                 .unwrap_or_default();
             *self.lines.borrow_mut() = Shown { width, lines };
             return;

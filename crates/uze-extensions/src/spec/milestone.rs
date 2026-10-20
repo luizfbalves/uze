@@ -452,10 +452,12 @@ fn roadmap_phases(roadmap: &str) -> Vec<(String, String, bool)> {
 
 /// A phase number as its parts, for ordering: `2.10` after `2.9`.
 fn number_order(number: &str) -> Vec<u32> {
-    number
-        .split('.')
-        .map(|part| part.parse().unwrap_or(0))
-        .collect()
+    number_parts(number).unwrap_or_default()
+}
+
+/// `02.1` → `[2, 1]`; `None` where a part is not a number.
+fn number_parts(number: &str) -> Option<Vec<u32>> {
+    number.split('.').map(|part| part.parse().ok()).collect()
 }
 
 /// ` 2.1: Import` → `("2.1", "Import")`.
@@ -493,8 +495,8 @@ fn leading_number(text: &str) -> &str {
 
 /// `03` and `3` are one phase; `2.1` and `2.10` are not.
 fn same_number(a: &str, b: &str) -> bool {
-    match (a.parse::<f64>(), b.parse::<f64>()) {
-        (Ok(a), Ok(b)) => a == b,
+    match (number_parts(a), number_parts(b)) {
+        (Some(a), Some(b)) => a == b,
         _ => false,
     }
 }
@@ -973,6 +975,18 @@ mod tests {
             ),
         );
         assert_eq!(read(&DiskHost, dir.path()).unwrap().percent, 0);
+    }
+
+    #[test]
+    fn phase_numbers_match_part_by_part() {
+        assert!(same_number("03", "3"));
+        assert!(same_number("02.1", "2.1"));
+        assert!(
+            !same_number("2.1", "2.10"),
+            "an eleventh insert is not the first"
+        );
+        assert!(!same_number("2", "2.0"));
+        assert!(!same_number("", ""), "no number is no phase");
     }
 
     #[test]

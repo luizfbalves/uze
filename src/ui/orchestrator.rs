@@ -1058,12 +1058,6 @@ fn agent_options(home: &UzeHome) -> Vec<AgentOption> {
         .collect()
 }
 
-/// The recognized agent, if any, running in `tab`'s pane — matched against
-/// `identities` by the live foreground process name (a shim-launched
-/// process reports its invoked alias there via `UZE_SHIM_NAME`, not its raw
-/// `comm` — see `uze_terminal::PaneRuntime::foreground_status`). Returns
-/// the harness's short binary/alias name (`claude`, `codex`, …) — what
-/// decides whether a tab lists under "agents" or "shell" at all.
 impl WorkspaceModel {
     /// What the agent in the selected tab is asked to call a Skill with;
     /// a slash, the commonest, where the tab runs no agent it recognizes.
@@ -1075,6 +1069,12 @@ impl WorkspaceModel {
     }
 }
 
+/// The recognized agent, if any, running in `tab`'s pane — matched against
+/// `identities` by the live foreground process name (a shim-launched
+/// process reports its invoked alias there via `UZE_SHIM_NAME`, not its raw
+/// `comm` — see `uze_terminal::PaneRuntime::foreground_status`). Returns
+/// the harness's short binary/alias name (`claude`, `codex`, …) — what
+/// decides whether a tab lists under "agents" or "shell" at all.
 fn agent_identity_for_tab<'a>(identities: &'a [AgentIdentity], tab: &Tab) -> Option<&'a str> {
     agent_for_tab(identities, tab).map(|identity| identity.binary)
 }
